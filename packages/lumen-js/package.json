@@ -1,0 +1,43 @@
+{
+  "name": "lumen-eth",
+  "version": "0.1.0",
+  "description": "Trustless Ethereum light client for the browser — no extension, no server, no trust required",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "wasm"
+  ],
+  "scripts": {
+    "build:wasm": "cd ../../crates/lumen-wasm && wasm-pack build --target web --release --out-dir ../../packages/lumen-js/wasm",
+    "build:ts": "tsc",
+    "build": "pnpm run build:ts",
+    "test": "vitest",
+    "clean": "rm -rf dist wasm"
+  },
+  "keywords": [
+    "ethereum",
+    "light-client",
+    "trustless",
+    "wasm",
+    "web3",
+    "p2p",
+    "eip-1193"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lumen-eth/lumen"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

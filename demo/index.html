@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lumen — Trustless Ethereum Light Client</title>
+  <style>
+    :root {
+      --bg-primary: #0a0a0f;
+      --bg-secondary: #12121a;
+      --bg-tertiary: #1a1a2e;
+      --text-primary: #e4e4f0;
+      --text-secondary: #8888a0;
+      --text-muted: #555570;
+      --accent-blue: #4f8ff7;
+      --accent-green: #34d399;
+      --accent-yellow: #fbbf24;
+      --accent-red: #f87171;
+      --accent-purple: #a78bfa;
+      --border-color: #2a2a3e;
+      --font-mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 3rem;
+      padding: 2rem 0;
+    }
+
+    header h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 0.5rem;
+    }
+
+    header p {
+      color: var(--text-secondary);
+      font-size: 1.1rem;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+
+    .card-header h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      font-family: var(--font-mono);
+    }
+
+    .status-badge.syncing {
+      background: rgba(251, 191, 36, 0.15);
+      color: var(--accent-yellow);
+      border: 1px solid rgba(251, 191, 36, 0.3);
+    }
+
+    .status-badge.synced {
+      background: rgba(52, 211, 153, 0.15);
+      color: var(--accent-green);
+      border: 1px solid rgba(52, 211, 153, 0.3);
+    }
+
+    .status-badge.error {
+      background: rgba(248, 113, 113, 0.15);
+      color: var(--accent-red);
+      border: 1px solid rgba(248, 113, 113, 0.3);
+    }
+
+    .status-badge.bootstrapping {
+      background: rgba(79, 143, 247, 0.15);
+      color: var(--accent-blue);
+      border: 1px solid rgba(79, 143, 247, 0.3);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+
+    .syncing .status-dot { background: var(--accent-yellow); }
+    .synced .status-dot { background: var(--accent-green); }
+    .error .status-dot { background: var(--accent-red); }
+    .bootstrapping .status-dot { background: var(--accent-blue); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+    }
+
+    .stat-item {
+      background: var(--bg-tertiary);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+
+    .stat-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 0.25rem;
+    }
+
+    .stat-value {
+      font-size: 1.25rem;
+      font-weight: 600;
+      font-family: var(--font-mono);
+      color: var(--text-primary);
+    }
+
+    .stat-value.mono {
+      font-size: 0.85rem;
+      word-break: break-all;
+    }
+
+    .connection-mode {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0.75rem 1rem;
+      background: var(--bg-tertiary);
+      border-radius: 8px;
+      margin-top: 1rem;
+    }
+
+    .connection-icon {
+      font-size: 1.2rem;
+    }
+
+    .connection-label {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+
+    .connection-label strong {
+      color: var(--text-primary);
+    }
+
+    .verify-section {
+      margin-top: 1rem;
+    }
+
+    .input-group {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+
+    .input-group input {
+      flex: 1;
+      padding: 0.75rem 1rem;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .input-group input:focus {
+      border-color: var(--accent-blue);
+    }
+
+    .input-group input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .btn {
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      border: none;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .btn-primary {
+      background: var(--accent-blue);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #3a7de8;
+    }
+
+    .btn-primary:disabled {
+      background: var(--text-muted);
+      cursor: not-allowed;
+    }
+
+    .result-box {
+      background: var(--bg-tertiary);
+      border-radius: 8px;
+      padding: 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      overflow-x: auto;
+    }
+
+    .result-box .label {
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .result-box .value {
+      color: var(--accent-green);
+      margin-top: 0.25rem;
+      word-break: break-all;
+    }
+
+    .result-box .value.error {
+      color: var(--accent-red);
+    }
+
+    .proof-steps {
+      margin-top: 1rem;
+    }
+
+    .proof-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 0.85rem;
+    }
+
+    .proof-step:last-child {
+      border-bottom: none;
+    }
+
+    .proof-step-icon {
+      font-size: 1rem;
+      margin-top: 0.1rem;
+    }
+
+    .proof-step-name {
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+
+    .proof-step-detail {
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+    }
+
+    .trust-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+
+    .trust-table th {
+      text-align: left;
+      padding: 0.5rem 0.75rem;
+      color: var(--text-muted);
+      font-weight: 500;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .trust-table td {
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .trust-table td:first-child {
+      font-family: var(--font-mono);
+      color: var(--accent-blue);
+    }
+
+    .trust-verified {
+      color: var(--accent-green);
+    }
+
+    .trust-warning {
+      color: var(--accent-yellow);
+    }
+
+    footer {
+      text-align: center;
+      padding: 2rem 0;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    footer a {
+      color: var(--accent-blue);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    .log-output {
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      max-height: 200px;
+      overflow-y: auto;
+      color: var(--text-secondary);
+      line-height: 1.8;
+    }
+
+    .log-output .log-entry {
+      padding: 0.1rem 0;
+    }
+
+    .log-output .log-time {
+      color: var(--text-muted);
+    }
+
+    .log-output .log-info { color: var(--accent-blue); }
+    .log-output .log-success { color: var(--accent-green); }
+    .log-output .log-warn { color: var(--accent-yellow); }
+    .log-output .log-error { color: var(--accent-red); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Lumen</h1>
+      <p>Trustless Ethereum light client running in your browser. No extension, no server, no API key.</p>
+    </header>
+
+    <!-- Sync Status Card -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Sync Status</h2>
+        <span id="sync-badge" class="status-badge bootstrapping">
+          <span class="status-dot"></span>
+          <span id="sync-status-text">Bootstrapping</span>
+        </span>
+      </div>
+      <div class="stat-grid">
+        <div class="stat-item">
+          <div class="stat-label">Head Slot</div>
+          <div class="stat-value" id="head-slot">—</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">Sync Period</div>
+          <div class="stat-value" id="sync-period">—</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">Connected Peers</div>
+          <div class="stat-value" id="peer-count">0</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">Proofs Verified</div>
+          <div class="stat-value" id="proofs-verified">0</div>
+        </div>
+      </div>
+      <div class="connection-mode" id="connection-mode">
+        <span class="connection-icon" id="connection-icon">⏳</span>
+        <div>
+          <div class="connection-label">
+            <strong id="connection-type">Bootstrapping</strong>
+          </div>
+          <div class="connection-label" id="connection-detail">
+            Connecting to Ethereum P2P network...
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Account Verification Card -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Verify Account Balance</h2>
+      </div>
+      <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1rem;">
+        Enter any Ethereum address to fetch and cryptographically verify its balance.
+        A Merkle proof is fetched from an untrusted RPC and verified locally using keccak256
+        against the finalized block's state root.
+      </p>
+      <div class="input-group">
+        <input
+          type="text"
+          id="address-input"
+          placeholder="0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+          spellcheck="false"
+        />
+        <button class="btn btn-primary" id="verify-btn">Verify</button>
+      </div>
+      <div id="verification-result" style="display: none;">
+        <div class="result-box">
+          <div class="label">Verified Balance</div>
+          <div class="value" id="verified-balance">—</div>
+        </div>
+        <div class="proof-steps" id="proof-steps"></div>
+      </div>
+    </div>
+
+    <!-- Trust Model Card -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Trust Model</h2>
+      </div>
+      <table class="trust-table">
+        <thead>
+          <tr>
+            <th>Method</th>
+            <th>Trust Level</th>
+            <th>Verification</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>eth_getBalance</td>
+            <td class="trust-verified">Fully Trustless</td>
+            <td>Merkle-Patricia trie proof</td>
+          </tr>
+          <tr>
+            <td>eth_getStorageAt</td>
+            <td class="trust-verified">Fully Trustless</td>
+            <td>Storage proof against account root</td>
+          </tr>
+          <tr>
+            <td>eth_getCode</td>
+            <td class="trust-verified">Fully Trustless</td>
+            <td>Code hash in account proof</td>
+          </tr>
+          <tr>
+            <td>eth_blockNumber</td>
+            <td class="trust-verified">Fully Trustless</td>
+            <td>Verified beacon chain head</td>
+          </tr>
+          <tr>
+            <td>eth_call</td>
+            <td class="trust-warning">Trusted Execution</td>
+            <td>Requires RPC (EVM not provable w/o zk)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Console Log Card -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Trust Log</h2>
+      </div>
+      <div class="log-output" id="log-output">
+        <div class="log-entry">
+          <span class="log-time">[00:00]</span>
+          <span class="log-info"> Lumen initializing...</span>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <p>
+        Lumen is open source.
+        <a href="https://github.com/lumen-eth/lumen">GitHub</a> ·
+        <a href="docs/trust-model.html">Trust Model</a> ·
+        <a href="docs/api.html">API Reference</a>
+      </p>
+      <p style="margin-top: 0.5rem;">
+        Balances verified via Merkle-Patricia trie proofs. No API key. No account. No extension.
+      </p>
+    </footer>
+  </div>
+
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

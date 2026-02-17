@@ -1,0 +1,22 @@
+{
+  "name": "lumen-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Trustless Ethereum light client for the browser",
+  "scripts": {
+    "build:wasm": "cd crates/lumen-wasm && wasm-pack build --target web --release",
+    "build:js": "cd packages/lumen-js && pnpm run build",
+    "build:react": "cd packages/lumen-react && pnpm run build",
+    "build:demo": "cd demo && pnpm run build",
+    "build": "pnpm run build:wasm && pnpm run build:js && pnpm run build:react && pnpm run build:demo",
+    "test:rust": "cargo test --workspace",
+    "test:js": "cd packages/lumen-js && pnpm run test",
+    "test": "pnpm run test:rust && pnpm run test:js",
+    "dev": "cd demo && pnpm run dev"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@9.1.0"
+}

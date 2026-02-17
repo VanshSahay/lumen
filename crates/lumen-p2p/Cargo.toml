@@ -1,0 +1,47 @@
+[package]
+name = "lumen-p2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "P2P networking layer for the Lumen Ethereum light client — WebRTC + WebTransport in the browser"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# libp2p with browser-compatible transports
+libp2p = { version = "0.54", features = [
+    "gossipsub",
+    "identify",
+    "ping",
+    "noise",
+    "yamux",
+    "macros",
+    "tokio",
+    "wasm-bindgen",
+] }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "RtcPeerConnection",
+    "RtcConfiguration",
+    "RtcDataChannel",
+    "console",
+] }
+
+# Async runtime for WASM
+futures = "0.3"
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+
+getrandom = { version = "0.2", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", features = ["sync"], default-features = false }

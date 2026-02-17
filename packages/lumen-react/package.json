@@ -1,0 +1,29 @@
+{
+  "name": "lumen-react",
+  "version": "0.1.0",
+  "description": "React hooks for the Lumen trustless Ethereum light client",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "lumen-eth": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/react": "^18.2.0",
+    "react": "^18.2.0"
+  },
+  "license": "MIT OR Apache-2.0"
+}

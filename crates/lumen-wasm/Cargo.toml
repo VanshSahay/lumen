@@ -1,0 +1,42 @@
+[package]
+name = "lumen-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly bindings for the Lumen Ethereum light client"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lumen-core = { path = "../lumen-core" }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "WorkerGlobalScope",
+    "Request",
+    "Response",
+    "Headers",
+    "ReadableStream",
+    "WebSocket",
+    "MessageEvent",
+    "console",
+    "RequestInit",
+    "RequestMode",
+] }
+
+serde-wasm-bindgen = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"
+hex = "0.4"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

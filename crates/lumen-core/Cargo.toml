@@ -1,0 +1,38 @@
+[package]
+name = "lumen-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure Rust Ethereum light client verification logic — no networking, no WASM dependencies"
+
+[dependencies]
+# BLS signature verification for sync committee
+blst = "0.3"
+
+# Ethereum types and RLP encoding
+alloy-primitives = "0.7"
+alloy-rlp = "0.3"
+
+# SSZ encoding (beacon chain uses SSZ, not RLP)
+ssz_rs = "0.9"
+
+# SHA256 / keccak for hashing
+sha2 = "0.10"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Hex encoding/decoding
+hex = "0.4"
+
+# Bitvector support
+bitvec = "1.0"
+
+[dev-dependencies]
+hex-literal = "0.4"
