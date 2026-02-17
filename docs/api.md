@@ -35,10 +35,10 @@ Create a fully initialized, trustless Ethereum provider.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `checkpoint` | `string` | Auto-fetched | Override the initial checkpoint hash (hex with 0x prefix) |
-| `fallbackRpc` | `string` | None | RPC URL for `eth_call` (untrusted, verified where possible) |
+| `fallbackRpc` | `string` | None | RPC URL for `eth_call` and proof data (untrusted, verified where possible) |
 | `checkpointSources` | `string[]` | 5 default sources | URLs to fetch checkpoint from |
-| `requiredCheckpointAgreement` | `number` | 3 | How many sources must agree |
-| `maxPeers` | `number` | 10 | Maximum P2P peer connections |
+| `requiredCheckpointAgreement` | `number` | 3 | How many sources must agree on the checkpoint |
+| `maxPeers` | `number` | 10 | Maximum P2P peer connections (for future P2P integration) |
 | `verbose` | `boolean` | true | Log trust state to console |
 
 **Returns:** `Promise<LumenProvider>`
@@ -47,7 +47,7 @@ Create a fully initialized, trustless Ethereum provider.
 
 ```typescript
 const provider = await createLumenProvider({
-  fallbackRpc: 'https://eth.llamarpc.com',  // For eth_call only
+  fallbackRpc: 'https://eth.llamarpc.com',  // Used for eth_call and proof data
   verbose: true,
 })
 ```
@@ -56,7 +56,7 @@ const provider = await createLumenProvider({
 
 ## `LumenProvider`
 
-The main provider class. Implements EIP-1193.
+The main provider class. Implements the EIP-1193 standard interface.
 
 ### `provider.request(args)`
 
@@ -64,37 +64,43 @@ Standard EIP-1193 request method.
 
 **Supported Methods:**
 
-#### `eth_chainId` — Fully Trustless
-Returns the chain ID. No network required.
+#### `eth_chainId` — No Network Required
+Returns the chain ID. Always `"0x1"` (mainnet).
 
 ```typescript
 const chainId = await provider.request({ method: 'eth_chainId' })
-// "0x1" (Ethereum mainnet)
+// "0x1"
 ```
 
-#### `eth_blockNumber` — Fully Trustless
+#### `eth_blockNumber` — Verified Head
 Returns the latest verified head slot.
 
 ```typescript
 const blockNumber = await provider.request({ method: 'eth_blockNumber' })
-// "0x96b3a1" (hex-encoded slot number)
+// "0x96b3a1" (hex-encoded block number)
 ```
 
-#### `eth_getBalance` — Fully Trustless
-Fetches and cryptographically verifies an account balance via Merkle proof.
+#### `eth_getBalance` — Locally Verified
+
+Fetches an account's Merkle proof from the configured data source and verifies it locally via keccak256 hash chain against the verified state root. The data source (RPC or P2P) is untrusted — only the local verification matters.
 
 ```typescript
 const balance = await provider.request({
   method: 'eth_getBalance',
   params: ['0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', 'latest']
 })
-// "0x1234..." (balance in wei, verified)
+// "0x1234..." (balance in wei, cryptographically verified)
 ```
 
-**Trust:** The balance is verified via a Merkle-Patricia trie proof against the beacon chain sync committee's verified state root. No trust in any third party.
+**Verification pipeline:**
+1. Fetch `eth_getProof` from data source (untrusted)
+2. Walk the Merkle-Patricia trie proof, verifying `keccak256(node) == expected_hash` at each step
+3. Decode the RLP account data at the leaf: `[nonce, balance, storageRoot, codeHash]`
+4. Return the balance only if the full proof checks out
 
-#### `eth_getTransactionCount` — Fully Trustless
-Fetches and verifies an account's nonce.
+#### `eth_getTransactionCount` — Locally Verified
+
+Fetches and verifies an account's nonce via the same Merkle proof pipeline.
 
 ```typescript
 const nonce = await provider.request({
@@ -103,8 +109,9 @@ const nonce = await provider.request({
 })
 ```
 
-#### `eth_getStorageAt` — Fully Trustless
-Fetches and verifies a contract storage slot.
+#### `eth_getStorageAt` — Locally Verified
+
+Fetches and verifies a contract storage slot via a two-level Merkle proof (account proof + storage proof).
 
 ```typescript
 const value = await provider.request({
@@ -113,7 +120,8 @@ const value = await provider.request({
 })
 ```
 
-#### `eth_getCode` — Fully Trustless
+#### `eth_getCode` — Locally Verified
+
 Verifies the code hash of a contract via account proof.
 
 ```typescript
@@ -123,8 +131,11 @@ const codeHash = await provider.request({
 })
 ```
 
-#### `eth_call` — Trusted Execution
+#### `eth_call` — Trusted Execution (The One Exception)
+
 Executes a call via the fallback RPC. **NOT verified.** Requires `fallbackRpc` in options.
+
+EVM execution cannot be proven without zero-knowledge proofs. This is the one operation where Lumen must trust an external source. A console warning is logged every time.
 
 ```typescript
 const result = await provider.request({
@@ -134,11 +145,12 @@ const result = await provider.request({
     data: '0x...'
   }, 'latest']
 })
-// ⚠ This result is from the fallback RPC and is NOT cryptographically verified
+// ⚠ Result is from the fallback RPC and is NOT cryptographically verified
 ```
 
-#### `eth_sendRawTransaction` — Trustless Broadcast
-Broadcasts a signed transaction to the P2P network.
+#### `eth_sendRawTransaction` — Broadcast
+
+Broadcasts a signed transaction via the fallback RPC (or P2P network when available).
 
 ```typescript
 const txHash = await provider.request({
@@ -153,7 +165,6 @@ Returns the current sync state.
 
 ```typescript
 const state = provider.getSyncState()
-// { status: 'synced', headSlot: 9876543, connectionMode: 'direct-webtransport' }
 ```
 
 **Return Type:**
@@ -200,7 +211,7 @@ import { createLumenProvider } from 'lumen-eth'
 const lumen = await createLumenProvider()
 const provider = new BrowserProvider(lumen)
 
-// Everything works as normal, but trustlessly verified
+// Everything works as normal, but with local Merkle proof verification
 const balance = await provider.getBalance('0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045')
 console.log('Balance:', balance.toString(), 'wei')
 ```
@@ -226,11 +237,10 @@ const balance = await client.getBalance({
 ### wagmi
 
 ```typescript
-import { createConfig, http } from 'wagmi'
+import { createConfig, custom } from 'wagmi'
 import { mainnet } from 'wagmi/chains'
 import { createLumenProvider } from 'lumen-eth'
 
-// In your wagmi config:
 const lumen = await createLumenProvider()
 
 const config = createConfig({
@@ -249,7 +259,6 @@ import { createLumenProvider } from 'https://unpkg.com/lumen-eth/dist/index.js'
 
 const provider = await createLumenProvider()
 
-// Direct JSON-RPC
 const balance = await provider.request({
   method: 'eth_getBalance',
   params: ['0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', 'latest']
@@ -291,35 +300,6 @@ function App() {
   return <p>Connected! Head: {syncState.headSlot}</p>
 }
 ```
-
----
-
-## Checkpoint Management
-
-### `fetchConsensusCheckpoint(sources?, requiredAgreement?)`
-
-Fetch and verify a checkpoint from multiple independent sources.
-
-```typescript
-import { fetchConsensusCheckpoint, DEFAULT_CHECKPOINT_SOURCES } from 'lumen-eth'
-
-const checkpoint = await fetchConsensusCheckpoint(
-  DEFAULT_CHECKPOINT_SOURCES,
-  3  // At least 3 must agree
-)
-
-console.log(checkpoint)
-// {
-//   blockRoot: '0xabcd...',
-//   slot: 9876543,
-//   sourceAgreement: 4,
-//   totalSources: 5
-// }
-```
-
-### `DEFAULT_CHECKPOINT_SOURCES`
-
-The default list of checkpoint source URLs.
 
 ---
 
@@ -375,16 +355,13 @@ When `verbose: true` (default), Lumen logs its trust state to the browser consol
 
 ```
 [Lumen] Initializing trustless Ethereum light client...
-[Lumen] Step 1/3: Fetching checkpoint from 5 sources...
-[Lumen] ✓ beaconcha.in: slot 9876543
-[Lumen] ✓ beaconstate.info: slot 9876543
-[Lumen] ✓ checkpoint.sigp.io: slot 9876543
-[Lumen] Checkpoint consensus: 3/5 sources agree
-[Lumen] Step 2/3: Loading WASM module (1.4MB)...
+[Lumen] Trust model: All data cryptographically verified via sync committee
+[Lumen] Step 1/3: Fetching checkpoint from multiple sources...
+[Lumen] Checkpoint verified: 3/5 sources agree
+[Lumen] Step 2/3: Initializing WASM verification module...
 [Lumen] Step 3/3: Starting P2P layer...
-[Lumen] Connected to 3 peers via WebTransport
-[Lumen] ✓ Ready. Connection: Direct WebTransport | 3 peers
+[Lumen] ✓ Initialization complete. Ready to serve trustless queries.
 [Lumen] ⚠ eth_call uses trusted execution via fallback RPC
 ```
 
-This is intentional. Developers should never have to guess what trust mode Lumen is operating in.
+The demo app (`demo/main.ts`) uses a visual trust log that shows each verification step in the UI with pass/fail indicators, timing, and details about which beacon APIs were consulted and how many trie nodes were verified.

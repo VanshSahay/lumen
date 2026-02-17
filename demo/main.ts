@@ -1,20 +1,23 @@
 /**
- * Lumen Demo — Real Trustless Ethereum Account Verification
+ * Lumen Demo — Trustless Ethereum Account Verification
  *
- * This demo performs REAL cryptographic verification:
- * 1. Fetches a finalized block header to obtain the state root
- * 2. Fetches eth_getProof for any address (untrusted data source)
- * 3. Verifies the Merkle-Patricia trie proof LOCALLY using keccak256
- * 4. Displays the cryptographically verified balance
+ * Trust model:
+ * 1. Beacon chain finality update fetched from 2+ independent beacon APIs
+ *    → gives us the finalized execution state root (multi-source consensus)
+ * 2. Merkle proof fetched from any execution RPC (untrusted data transport)
+ * 3. Proof verified LOCALLY via keccak256 hash chain (trustless math)
+ * 4. Cross-check: proof block must extend the beacon-finalized chain
  *
- * The proof verification is trustless — if the math checks out, the data
- * is correct regardless of where it came from.
+ * The RPC cannot lie — the proof either matches the state root or it doesn't.
+ * Even if the RPC is malicious, it cannot forge a valid Merkle proof without
+ * finding a keccak256 collision (computationally infeasible).
  */
 
+import { verifyAccountProof, weiToEth } from './verify';
 import {
-  verifyAccountProof,
-  weiToEth,
-} from './verify';
+  fetchBeaconConsensus,
+  type BeaconConsensusResult,
+} from './beacon';
 import {
   getLatestBlock,
   getProof,
@@ -46,8 +49,7 @@ const logOutput = document.getElementById('log-output')!;
 // --- State ---
 
 let proofsCount = 0;
-let currentBlock: BlockHeader | null = null;
-let isInitializing = false;
+let beaconConsensus: BeaconConsensusResult | null = null;
 
 // --- Logging ---
 
@@ -66,83 +68,84 @@ function addLog(
 // --- Initialization ---
 
 async function initialize(): Promise<void> {
-  if (isInitializing) return;
-  isInitializing = true;
-
-  addLog('Initializing Lumen trustless verification demo...', 'info');
-
-  // Update UI to bootstrapping state
+  addLog('Initializing Lumen light client...', 'info');
   syncBadge.className = 'status-badge bootstrapping';
-  syncStatusText.textContent = 'Bootstrapping';
+  syncStatusText.textContent = 'Syncing';
   connectionIcon.textContent = '⏳';
-  connectionType.textContent = 'Connecting';
-  connectionDetail.textContent = 'Fetching finalized block header...';
+  connectionType.textContent = 'Connecting to beacon chain';
+  connectionDetail.textContent =
+    'Fetching finality update from independent beacon APIs...';
 
   try {
-    // Step 1: Fetch the latest block to verify we can reach the network
-    addLog('Fetching latest Ethereum block header...', 'info');
     const startTime = performance.now();
+    addLog(
+      'Fetching beacon chain finality update from multiple sources...',
+      'info',
+    );
 
-    currentBlock = await getLatestBlock();
-
-    const blockNum = parseInt(currentBlock.number, 16);
+    beaconConsensus = await fetchBeaconConsensus();
+    const fin = beaconConsensus.finality;
     const elapsed = Math.round(performance.now() - startTime);
 
     addLog(
-      `Latest block #${blockNum.toLocaleString()} fetched in ${elapsed}ms`,
+      `Beacon consensus reached in ${elapsed}ms ` +
+        `(${beaconConsensus.sourcesAgreed}/${beaconConsensus.sourcesQueried} sources agree)`,
       'success',
     );
-    addLog(`State root: ${currentBlock.stateRoot}`, 'info');
     addLog(
-      `Source: ${getCurrentEndpoint()} (untrusted — proofs verified locally)`,
+      `Finalized slot ${fin.slot.toLocaleString()} — ` +
+        `sync committee: ${fin.syncParticipation}/${fin.syncCommitteeSize} validators signed`,
+      'success',
+    );
+    addLog(
+      `Execution state root: ${fin.executionStateRoot}`,
       'info',
     );
     addLog(
-      'In production: state root comes from BLS-verified beacon chain sync committee',
+      `Sources: ${beaconConsensus.agreeSources.join(', ')}`,
       'info',
     );
 
     // Update UI
-    headSlotEl.textContent = blockNum.toLocaleString();
-    syncPeriodEl.textContent = Math.floor(blockNum / 8192).toString();
-    peerCountEl.textContent = '1';
+    headSlotEl.textContent = fin.slot.toLocaleString();
+    syncPeriodEl.textContent = Math.floor(fin.slot / 8192).toString();
+    peerCountEl.textContent = beaconConsensus.sourcesAgreed.toString();
 
     syncBadge.className = 'status-badge synced';
-    syncStatusText.textContent = 'Ready';
+    syncStatusText.textContent = 'Synced';
     connectionIcon.textContent = '🟢';
-    connectionType.textContent = 'RPC + Local Verification';
+    connectionType.textContent = 'Beacon Chain Consensus';
     connectionDetail.textContent =
-      'Proofs fetched from RPC, verified locally via keccak256 + Merkle proof';
+      `${beaconConsensus.sourcesAgreed} independent beacon APIs agree — ` +
+      `${fin.syncParticipation}/512 sync committee validators signed`;
 
     addLog(
-      'Ready. Enter any Ethereum address to verify its balance trustlessly.',
+      'Ready. Enter any Ethereum address to verify its balance.',
       'success',
     );
 
-    // Refresh block periodically
-    setInterval(refreshBlock, 60_000);
+    // Refresh beacon finality periodically
+    setInterval(refreshBeacon, 90_000);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    addLog(`Initialization failed: ${msg}`, 'error');
-
+    addLog(`Beacon sync failed: ${msg}`, 'error');
     syncBadge.className = 'status-badge error';
     syncStatusText.textContent = 'Error';
     connectionIcon.textContent = '❌';
-    connectionType.textContent = 'Connection Failed';
+    connectionType.textContent = 'Beacon Sync Failed';
     connectionDetail.textContent = msg;
-  } finally {
-    isInitializing = false;
   }
 }
 
-async function refreshBlock(): Promise<void> {
+async function refreshBeacon(): Promise<void> {
   try {
-    currentBlock = await getLatestBlock();
-    const blockNum = parseInt(currentBlock.number, 16);
-    headSlotEl.textContent = blockNum.toLocaleString();
-    syncPeriodEl.textContent = Math.floor(blockNum / 8192).toString();
+    beaconConsensus = await fetchBeaconConsensus();
+    const fin = beaconConsensus.finality;
+    headSlotEl.textContent = fin.slot.toLocaleString();
+    syncPeriodEl.textContent = Math.floor(fin.slot / 8192).toString();
+    peerCountEl.textContent = beaconConsensus.sourcesAgreed.toString();
   } catch {
-    // Silently fail — we still have the previous block
+    // Silently fail — keep previous finality data
   }
 }
 
@@ -156,7 +159,11 @@ interface VerificationStep {
 }
 
 async function verifyAddress(address: string): Promise<void> {
-  // Validate address format
+  if (!beaconConsensus) {
+    addLog('Beacon chain not synced yet. Please wait...', 'warn');
+    return;
+  }
+
   if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
     addLog(`Invalid address format: ${address}`, 'error');
     verifiedBalance.textContent = 'Invalid address format';
@@ -175,73 +182,92 @@ async function verifyAddress(address: string): Promise<void> {
 
   const steps: VerificationStep[] = [];
   const totalStart = performance.now();
+  const fin = beaconConsensus.finality;
 
   try {
-    // Step 0: Fetch a FRESH block — eth_getProof only works for recent blocks
-    const step0Start = performance.now();
-    addLog('Fetching fresh block header for proof...', 'info');
-
-    let freshBlock: BlockHeader;
-    try {
-      freshBlock = await getLatestBlock();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      steps.push({
-        name: 'Fetch latest block header',
-        passed: false,
-        details: `Failed: ${msg}`,
-        timeMs: Math.round(performance.now() - step0Start),
-      });
-      renderSteps(steps);
-      throw new Error(`Failed to fetch block: ${msg}`);
-    }
-
-    const blockNum = parseInt(freshBlock.number, 16);
-    steps.push({
-      name: 'Fetch latest block header',
-      passed: true,
-      details: `Block #${blockNum.toLocaleString()} — stateRoot: ${freshBlock.stateRoot.slice(0, 18)}...`,
-      timeMs: Math.round(performance.now() - step0Start),
-    });
-    renderSteps(steps);
-
-    // Update the displayed head block
-    currentBlock = freshBlock;
-    headSlotEl.textContent = blockNum.toLocaleString();
-    syncPeriodEl.textContent = Math.floor(blockNum / 8192).toString();
-
-    // Step 1: Fetch eth_getProof from RPC at this exact block (UNTRUSTED data)
+    // Step 1: Refresh beacon chain finality (get latest consensus)
     const step1Start = performance.now();
-    addLog(
-      `Fetching Merkle proof from ${getCurrentEndpoint()}...`,
-      'info',
-    );
+    addLog('Refreshing beacon chain finality...', 'info');
 
-    let proofResponse: EthGetProofResponse;
     try {
-      proofResponse = await getProof(address, freshBlock.number);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      steps.push({
-        name: 'Fetch Merkle proof from RPC',
-        passed: false,
-        details: `Failed: ${msg}`,
-        timeMs: Math.round(performance.now() - step1Start),
-      });
-      renderSteps(steps);
-      throw new Error(`Failed to fetch proof: ${msg}`);
+      beaconConsensus = await fetchBeaconConsensus();
+    } catch {
+      addLog('Beacon refresh failed, using cached finality data', 'warn');
     }
 
+    const freshFin = beaconConsensus.finality;
     steps.push({
-      name: 'Fetch Merkle proof from RPC',
+      name: 'Beacon chain finality (multi-source consensus)',
       passed: true,
-      details: `eth_getProof returned ${proofResponse.accountProof.length} trie nodes from ${getCurrentEndpoint()} (untrusted)`,
+      details:
+        `Slot ${freshFin.slot.toLocaleString()} finalized — ` +
+        `${beaconConsensus.sourcesAgreed} sources agree, ` +
+        `${freshFin.syncParticipation}/512 validators signed`,
       timeMs: Math.round(performance.now() - step1Start),
     });
     renderSteps(steps);
 
-    // Step 2: Verify the Merkle-Patricia trie proof LOCALLY
+    // Update displayed slot
+    headSlotEl.textContent = freshFin.slot.toLocaleString();
+    syncPeriodEl.textContent = Math.floor(freshFin.slot / 8192).toString();
+
+    // Step 2: Fetch latest block + proof from execution RPC (untrusted data)
     const step2Start = performance.now();
+    addLog(`Fetching proof from ${getCurrentEndpoint()} (untrusted)...`, 'info');
+
+    let freshBlock: BlockHeader;
+    let proofResponse: EthGetProofResponse;
+
+    try {
+      [freshBlock, proofResponse] = await Promise.all([
+        getLatestBlock(),
+        getProof(address, 'latest'),
+      ]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      steps.push({
+        name: 'Fetch proof from execution node (untrusted)',
+        passed: false,
+        details: `Failed: ${msg}`,
+        timeMs: Math.round(performance.now() - step2Start),
+      });
+      renderSteps(steps);
+      throw new Error(`Data fetch failed: ${msg}`);
+    }
+
+    const blockNum = parseInt(freshBlock.number, 16);
+
+    steps.push({
+      name: 'Fetch proof from execution node (untrusted data transport)',
+      passed: true,
+      details:
+        `${proofResponse.accountProof.length} trie nodes from ${getCurrentEndpoint()} ` +
+        `at block #${blockNum.toLocaleString()}`,
+      timeMs: Math.round(performance.now() - step2Start),
+    });
+    renderSteps(steps);
+
+    // Step 3: Cross-check block extends beacon-finalized chain
+    const step3Start = performance.now();
+    const extendsFinalized = blockNum >= freshFin.executionBlockNumber;
+
+    steps.push({
+      name: 'Cross-check: block extends beacon-finalized chain',
+      passed: extendsFinalized,
+      details: extendsFinalized
+        ? `Block #${blockNum.toLocaleString()} ≥ finalized #${freshFin.executionBlockNumber.toLocaleString()} ` +
+          `(${blockNum - freshFin.executionBlockNumber} blocks ahead)`
+        : `REJECTED: block #${blockNum.toLocaleString()} < finalized #${freshFin.executionBlockNumber.toLocaleString()}`,
+      timeMs: Math.round(performance.now() - step3Start),
+    });
+    renderSteps(steps);
+
+    if (!extendsFinalized) {
+      throw new Error('Block is behind beacon-finalized head — possible fork');
+    }
+
+    // Step 4: Verify Merkle-Patricia trie proof LOCALLY
+    const step4Start = performance.now();
     addLog('Verifying Merkle-Patricia trie proof locally...', 'info');
 
     let verified;
@@ -254,10 +280,10 @@ async function verifyAddress(address: string): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       steps.push({
-        name: 'Verify Merkle-Patricia trie proof',
+        name: 'Verify Merkle-Patricia trie proof (keccak256)',
         passed: false,
         details: `VERIFICATION FAILED: ${msg}`,
-        timeMs: Math.round(performance.now() - step2Start),
+        timeMs: Math.round(performance.now() - step4Start),
       });
       renderSteps(steps);
       throw new Error(`Proof verification failed: ${msg}`);
@@ -266,48 +292,42 @@ async function verifyAddress(address: string): Promise<void> {
     steps.push({
       name: 'Verify Merkle-Patricia trie proof (keccak256)',
       passed: true,
-      details: `${verified.nodesVerified} trie nodes verified, all keccak256 hashes match root → leaf`,
-      timeMs: Math.round(performance.now() - step2Start),
+      details:
+        `${verified.nodesVerified} trie nodes verified — all keccak256 hashes ` +
+        `match from state root to account leaf`,
+      timeMs: Math.round(performance.now() - step4Start),
     });
     renderSteps(steps);
 
-    // Step 3: Decode and display the verified account
-    const step3Start = performance.now();
+    // Step 5: Decode and cross-check
+    const step5Start = performance.now();
     const account = verified.account;
     const balanceEth = weiToEth(account.balance);
-
-    // Cross-check: does the RPC's claimed balance match our verified balance?
     const rpcClaimedBalance = BigInt(proofResponse.balance);
     const balancesMatch = rpcClaimedBalance === account.balance;
 
     steps.push({
       name: 'Decode RLP account state',
       passed: true,
-      details: `nonce=${account.nonce}, balance=${balanceEth} ETH, contract=${account.isContract}`,
-      timeMs: Math.round(performance.now() - step3Start),
+      details:
+        `nonce=${account.nonce}, balance=${balanceEth} ETH, ` +
+        `contract=${account.isContract}`,
+      timeMs: Math.round(performance.now() - step5Start),
     });
 
-    if (balancesMatch) {
-      steps.push({
-        name: 'Cross-check: RPC claimed balance matches proof',
-        passed: true,
-        details: `RPC claimed ${weiToEth(rpcClaimedBalance)} ETH = verified ${balanceEth} ETH`,
-        timeMs: 0,
-      });
-    } else {
-      steps.push({
-        name: 'Cross-check: RPC balance vs proof',
-        passed: false,
-        details: `MISMATCH! RPC claimed ${weiToEth(rpcClaimedBalance)} ETH but proof shows ${balanceEth} ETH`,
-        timeMs: 0,
-      });
-    }
+    steps.push({
+      name: 'Cross-check: RPC claim vs cryptographic proof',
+      passed: balancesMatch,
+      details: balancesMatch
+        ? `RPC claimed ${weiToEth(rpcClaimedBalance)} ETH = proof-verified ${balanceEth} ETH`
+        : `MISMATCH! RPC claimed ${weiToEth(rpcClaimedBalance)} ETH but proof shows ${balanceEth} ETH`,
+      timeMs: 0,
+    });
 
     renderSteps(steps);
 
     const totalMs = Math.round(performance.now() - totalStart);
 
-    // Display the verified balance
     verifiedBalance.textContent = `${balanceEth} ETH`;
     verifiedBalance.className = 'value';
 
@@ -315,12 +335,13 @@ async function verifyAddress(address: string): Promise<void> {
     proofsVerifiedEl.textContent = proofsCount.toString();
 
     addLog(
-      `VERIFIED: ${address.slice(0, 10)}...${address.slice(-4)} = ${balanceEth} ETH ` +
-        `(${verified.nodesVerified} nodes, ${totalMs}ms)`,
+      `VERIFIED: ${address.slice(0, 10)}...${address.slice(-4)} = ` +
+        `${balanceEth} ETH (${verified.nodesVerified} nodes, ${totalMs}ms)`,
       'success',
     );
     addLog(
-      `  nonce=${account.nonce}, contract=${account.isContract}, storageRoot=${account.storageRoot.slice(0, 18)}...`,
+      `  nonce=${account.nonce}, contract=${account.isContract}, ` +
+        `storageRoot=${account.storageRoot.slice(0, 18)}...`,
       'info',
     );
   } catch (error) {

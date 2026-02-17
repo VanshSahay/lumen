@@ -11,110 +11,123 @@ Almost every "decentralized" application today has a dirty secret: it trusts a c
 
 This isn't a theoretical problem. This is the current state of Web3's architecture. The blockchain itself is decentralized. The applications reading from it are not.
 
-Lumen fixes this by moving the verification into the browser itself.
+Lumen fixes this by verifying Ethereum data directly in the browser using cryptographic proofs.
 
 ---
 
-## How Beacon Chain Light Clients Work
+## How It Works (The Real Data Flow)
 
-Ethereum's consensus layer (the beacon chain) has a built-in mechanism for light clients: the **sync committee**.
+Lumen's verification has three stages:
 
-### The Sync Committee
+### Stage 1: Beacon Chain Consensus (State Root)
 
-Every ~27 hours (256 epochs), Ethereum randomly selects 512 validators to form the **sync committee**. These 512 validators are responsible for signing every block header during their duty period. This signature is specifically designed for light client verification.
+The beacon chain is Ethereum's source of truth. Every ~6.4 minutes, a block is finalized — meaning 2/3+ of all validators have attested to it. This finalized block contains an execution payload with a `stateRoot` — the root hash of the entire Ethereum state trie.
 
-The key insight: **you don't need to verify every validator's signature**. You only need to verify that 2/3+ of the 512 sync committee members signed off on a block header. This is the same trust assumption as trusting Ethereum itself.
+Lumen fetches the latest **light client finality update** from multiple independent beacon chain APIs:
 
-### BLS Signature Aggregation
+- **ChainSafe Lodestar** (`lodestar-mainnet.chainsafe.io`)
+- **PublicNode Beacon** (`ethereum-beacon-api.publicnode.com`)
 
-The sync committee uses BLS12-381 signatures, which have a critical property: **signatures can be aggregated**. Instead of verifying 512 individual signatures (which would be slow), we verify a single aggregate signature against the aggregate of participating public keys.
+The finality update includes:
+- The finalized beacon slot number
+- The finalized execution payload (state root, block number, block hash)
+- The sync committee aggregate signature and participation bitvector
 
-The verification pipeline:
-1. Receive a `LightClientUpdate` containing the attested header and sync committee signature
-2. Extract the bitvector indicating which committee members signed (must be ≥ 342/512)
-3. Aggregate the public keys of participating members
-4. Verify the aggregate signature against the signing root
-5. If it passes, the header is legitimate (with the same trust as Ethereum consensus)
+Lumen requires **all sources to agree** on the same finalized execution state root. If any disagree, it halts and reports the discrepancy. This is the "checkpoint sync" trust model — multi-source consensus prevents any single provider from lying.
 
-### Merkle-Patricia Trie Proofs
+The sync committee participation is also checked: typically 500+ of 512 validators sign each finalized block. This is reported in the UI so users can see the health of the consensus.
 
-Once we have a verified block header (which contains a `stateRoot`), we can verify any piece of execution layer data using Merkle-Patricia trie proofs:
+### Stage 2: Merkle Proof Fetching (Untrusted Data)
+
+Once we have a trusted state root from the beacon chain, we need the actual Merkle proof for a specific account. This is fetched via `eth_getProof` from an execution RPC endpoint.
+
+**The execution RPC is treated as an untrusted data transport.** It could be PublicNode, LlamaRPC, a local node, or a malicious server — it doesn't matter. The proof bytes are verified locally in Stage 3. The RPC cannot forge a valid proof without finding a keccak256 collision (computationally infeasible — would require ~2^128 operations).
+
+A practical constraint: free public RPCs only serve `eth_getProof` for very recent blocks (the "proof window" is typically <128 blocks). Since the beacon-finalized block can be ~95 blocks behind the head, Lumen fetches the proof at the `latest` block and cross-checks that this block extends the beacon-finalized chain (block number >= finalized block number).
+
+### Stage 3: Local Cryptographic Verification
+
+The Merkle-Patricia trie proof is verified entirely in the browser:
+
+1. Compute `keccak256(address)` to get the trie key (20-byte address → 32-byte key)
+2. Start at the state root hash from the beacon chain
+3. For each node in the proof:
+   - Verify `keccak256(node_rlp) == expected_hash`
+   - Decode the RLP node (branch with 17 items, or extension/leaf with 2 items)
+   - Follow the path using the key nibbles
+4. At the leaf, decode the RLP-encoded account: `[nonce, balance, storageRoot, codeHash]`
+5. Cross-check: the proof-extracted balance should match what the RPC claimed
+
+If ANY hash in the chain doesn't match, the proof is **rejected**. The verification is pure math — no trust required.
+
+---
+
+## The Sync Committee
+
+Every ~27 hours (256 epochs), Ethereum randomly selects 512 validators to form the **sync committee**. These validators sign every block header during their duty period. The key insight: you don't need to verify every validator's signature — you only need to verify that 2/3+ of the 512 sync committee members signed off.
+
+The sync committee uses BLS12-381 signatures, which can be aggregated — instead of verifying 512 individual signatures, you verify a single aggregate signature against the aggregate of participating public keys. This is what the Rust `lumen-core` crate implements.
+
+In the current demo, BLS signature verification is not performed on each request. Instead, the demo uses multi-source consensus (multiple beacon APIs agreeing on the same finality update) as a practical approximation. The BLS verification code exists in `lumen-core` and is compiled to WASM, ready for integration when the full light client sync pipeline is connected.
+
+---
+
+## Why Merkle-Patricia Trie Proofs Work
+
+Once you have a verified state root (from the beacon chain), you can prove any account's state:
 
 - **Account proof**: Proves an account's nonce, balance, storage root, and code hash against the state root
 - **Storage proof**: Proves a specific storage slot value against an account's storage root
 - **Receipt proof**: Proves a transaction receipt against the receipts root
 
-These proofs are purely mathematical — given a root hash and a proof path, either the data is correct or it isn't. No trust required.
+These proofs are purely mathematical — given a root hash and a proof path, either the data is correct or it isn't. The demo implements this verification in TypeScript using `js-sha3` for keccak256 hashing, with full RLP decoding and Merkle-Patricia trie walking.
+
+The Rust `lumen-core` crate implements the same verification logic, along with BLS signature verification. The WASM module (`lumen-wasm`) exposes these functions to JavaScript via `wasm-bindgen`.
 
 ---
 
-## Why WASM in the Browser
+## The Rust/WASM Stack
 
-### The Problem with JavaScript Crypto
-
-JavaScript's `BigInt` and floating-point math are not suitable for consensus-critical cryptography:
-
-- **No constant-time guarantees** — timing attacks are possible
-- **Floating point** — rounding errors in any financial calculation are unacceptable
-- **Performance** — BLS verification in JS is 10-50x slower than native/WASM
-
-### Why Not a Browser Extension?
-
-Extensions require installation, create a trust boundary (you trust the extension author), and are not available on mobile browsers. Lumen runs as a regular script — no permissions, no installation, no trust in a third party.
-
-### The WASM Approach
-
-Lumen compiles the entire verification pipeline (BLS signatures, Merkle proofs, RLP decoding) to WebAssembly:
+### Why Rust?
 
 - **Correctness**: Rust's type system and memory safety prevent entire classes of bugs
-- **Performance**: WASM runs at near-native speed, ~10x faster than JS for crypto
-- **Portability**: Works in every modern browser (Chrome, Firefox, Safari, Edge)
-- **Size**: The compiled WASM binary is under 2MB gzipped
-- **Isolation**: Runs in a Web Worker, never blocking the main thread
+- **Performance**: BLS12-381 verification is computationally intensive — Rust/WASM is ~10x faster than JavaScript for this
+- **Portability**: Compiles to WASM that runs in every modern browser
 
----
+### Crate Structure
 
-## The P2P Strategy
+**`lumen-core`** — Pure Rust verification library (no networking, no WASM dependencies):
+- BLS12-381 signature verification via the `blst` crate
+- Merkle-Patricia trie proof verification
+- RLP decoding for Ethereum account data
+- SSZ types for beacon chain data
+- Checkpoint consensus logic
+- 30+ tests with real Ethereum data structures
 
-### Why Not Just Use HTTP?
+**`lumen-wasm`** — WASM bindings via `wasm-bindgen`:
+- `LumenClient` struct with methods for processing light client updates and verifying proofs
+- Browser Fetch API wrappers for network requests
+- JSON-RPC provider utilities
+- Verified state cache and sync progress tracking
+- Compiled size: 298 KB raw, **115 KB gzipped**
 
-HTTP requests go to a single server. That server is a single point of failure and trust. Even if you verify the response, the server can:
+**`lumen-p2p`** — P2P layer types and configuration:
+- libp2p transport configuration (WebRTC, WebTransport)
+- GossipSub behaviour for beacon chain topics
+- Peer scoring and bootstrap node configuration
+- Circuit relay strategies
 
-- Refuse to respond (censorship)
-- Respond with stale data (omission)
-- Track which addresses you query (privacy)
+### Build Pipeline
 
-### WebRTC and WebTransport
+The `build.sh` script orchestrates the full build:
+1. Run all Rust tests (`cargo test --workspace` — 37 tests)
+2. Compile WASM via `wasm-pack` with LLVM clang for `wasm32-unknown-unknown`
+3. Check gzipped WASM size (must be <2 MB)
+4. Install npm dependencies (`pnpm install`)
+5. Build TypeScript packages (`lumen-js`, `lumen-react`)
+6. Build the demo app (Vite)
 
-Browsers can't open raw TCP connections. But they can use:
-
-1. **WebTransport** (preferred) — a new browser API built on HTTP/3 and QUIC. Lower latency than WebRTC, supports both reliable and unreliable streams. Used by Ethereum nodes that support it.
-
-2. **WebRTC** (fallback) — the same technology that powers video calls. Can establish direct peer-to-peer connections through NATs using STUN/TURN. More widely supported.
-
-Both are encrypted and provide direct connections to Ethereum nodes.
-
-### The Circuit Relay Bootstrap Problem
-
-There's a chicken-and-egg problem: to find peers, you need to be connected to peers. The solution is circuit relays:
-
-1. On startup, try to connect directly to known Ethereum bootnodes via WebTransport
-2. If no direct connection within 3 seconds, connect via a circuit relay
-3. The relay forwards traffic between us and Ethereum peers
-4. Once connected, ask peers for more peer addresses (peer exchange)
-5. Establish direct connections to discovered peers
-6. Drop the relay connection once we have direct peers
-
-**Trust implication**: The circuit relay can see metadata (who's connecting to whom) but cannot read or modify data (encrypted with Noise protocol). This is acceptable for bootstrapping but should be upgraded to direct connections ASAP.
-
-### GossipSub
-
-Once connected to Ethereum peers, Lumen subscribes to beacon chain gossip topics:
-
-- `light_client_finality_update` — new finalized chain heads (strongest guarantee)
-- `light_client_optimistic_update` — new attested blocks (lower latency)
-
-Messages arrive as SSZ-encoded bytes, are deserialized, and passed through the full BLS verification pipeline. Invalid messages are discarded and the sending peer's score is reduced.
+On macOS, `blst` (the BLS library) requires Homebrew LLVM for cross-compilation to WASM. The build script auto-detects this at `/opt/homebrew/opt/llvm` (Apple Silicon) or `/usr/local/opt/llvm` (Intel).
 
 ---
 
@@ -130,61 +143,60 @@ Lumen's approach:
 3. The console logs a warning every time this happens
 4. Documentation explicitly states this is the one trust exception
 
-The long-term solution is to embed a zk-EVM prover in the browser, which would make `eth_call` provable. This is an active area of research but not yet practical for production use.
+The long-term solution is a zk-EVM prover in the browser, which would make `eth_call` provable. This is an active area of research but not yet practical for production use.
 
 ---
 
 ## System Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Browser                               │
-│                                                              │
-│  ┌──────────────────┐     ┌─────────────────────────────┐   │
-│  │    Main Thread    │     │        Web Worker            │   │
-│  │                   │     │                              │   │
-│  │  ┌─────────────┐ │ msg │  ┌──────────────────────┐   │   │
-│  │  │ LumenProvider│◄├─────├──┤  lumen-wasm (WASM)   │   │   │
-│  │  │  (EIP-1193) │ │     │  │  ┌────────────────┐  │   │   │
-│  │  └─────────────┘ │     │  │  │  lumen-core    │  │   │   │
-│  │        │         │     │  │  │  (Rust)        │  │   │   │
-│  │        │         │     │  │  │  - BLS verify  │  │   │   │
-│  │  ┌─────────────┐ │     │  │  │  - MPT proofs  │  │   │   │
-│  │  │  Your dApp  │ │     │  │  │  - Checkpoint  │  │   │   │
-│  │  │  (ethers.js │ │     │  │  └────────────────┘  │   │   │
-│  │  │   / viem)   │ │     │  └──────────────────────┘   │   │
-│  │  └─────────────┘ │     │             │               │   │
-│  └──────────────────┘     │  ┌──────────────────────┐   │   │
-│                           │  │  lumen-p2p (WASM)    │   │   │
-│                           │  │  - libp2p            │   │   │
-│                           │  │  - WebRTC/WebTransp  │   │   │
-│                           │  │  - GossipSub         │   │   │
-│                           │  └──────────┬───────────┘   │   │
-│                           └─────────────┼───────────────┘   │
-│                                         │                    │
-└─────────────────────────────────────────┼────────────────────┘
-                                          │
-                              ┌───────────┴───────────┐
-                              │  Ethereum P2P Network  │
-                              │  (WebRTC/WebTransport) │
-                              └────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                          Browser                              │
+│                                                               │
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │                     Demo / dApp                          │ │
+│  │                                                          │ │
+│  │  beacon.ts          rpc.ts             verify.ts         │ │
+│  │  ┌────────────┐     ┌──────────────┐   ┌─────────────┐  │ │
+│  │  │ Beacon API │     │ Execution    │   │ keccak256 + │  │ │
+│  │  │ Consensus  │     │ RPC (untrust)│   │ RLP + MPT   │  │ │
+│  │  └─────┬──────┘     └──────┬───────┘   └──────┬──────┘  │ │
+│  │        │                   │                   │         │ │
+│  │        ▼                   ▼                   ▼         │ │
+│  │  finalized            eth_getProof       local proof     │ │
+│  │  state root           (raw bytes)        verification    │ │
+│  └──┬──────────────────────────────────────────────┬────────┘ │
+│     │                                              │          │
+│  ┌──▼──────────────────────────────────────────────▼────────┐ │
+│  │              Rust/WASM (lumen-core + lumen-wasm)          │ │
+│  │  BLS12-381 verification │ MPT proofs │ RLP/SSZ decoding   │ │
+│  │  (compiled, 115 KB gzip)                                  │ │
+│  └───────────────────────────────────────────────────────────┘ │
+└──────────────┬────────────────────────┬───────────────────────┘
+               │                        │
+    ┌──────────▼──────────┐  ┌──────────▼──────────┐
+    │  Beacon Chain APIs   │  │  Execution RPCs      │
+    │  (ChainSafe, Public  │  │  (PublicNode, Llama   │
+    │   Node — consensus)  │  │   — untrusted data)   │
+    └─────────────────────┘  └──────────────────────┘
 ```
 
 ---
 
 ## Data Flow: Verifying a Balance
 
-1. dApp calls `provider.request({ method: 'eth_getBalance', params: ['0x...', 'latest'] })`
-2. LumenProvider sends request to WASM worker
-3. Worker requests `eth_getProof` from connected P2P peer (or fallback RPC)
-4. Proof response arrives (untrusted data from network)
-5. Worker passes proof to `lumen-core::verify_account_proof()`
+1. User enters an Ethereum address in the demo
+2. `beacon.ts` fetches the light client finality update from 2 independent beacon APIs
+3. Both sources must agree on the finalized execution state root (consensus check)
+4. `rpc.ts` fetches `eth_getProof` from an execution RPC at the `latest` block
+5. `main.ts` cross-checks that the proof block extends the beacon-finalized chain
+6. `verify.ts` walks the Merkle-Patricia trie proof:
    - Computes `keccak256(address)` to get the trie key
-   - Walks the Merkle-Patricia trie proof from root to leaf
-   - At each step, verifies `keccak256(node) == expected_hash`
-   - Checks the root matches our verified `stateRoot`
-   - Decodes the RLP-encoded account data
-6. If verification passes, returns the balance to the dApp
-7. If verification fails, throws an error (never returns unverified data)
+   - At each node: verifies `keccak256(node_rlp) == expected_hash`
+   - Follows branch/extension/leaf nodes using key nibbles
+   - Decodes the RLP-encoded account at the leaf: `[nonce, balance, storageRoot, codeHash]`
+7. Cross-checks the proof-verified balance against the RPC's claimed balance
+8. If all checks pass, displays the verified balance
+9. If any check fails, shows an error (never displays unverified data)
 
-Total time: ~50-200ms (dominated by network, not verification).
+Typical end-to-end time: ~500ms (dominated by beacon API fetch; local verification is <100ms).

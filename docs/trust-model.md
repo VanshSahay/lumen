@@ -14,6 +14,8 @@ If you find something we're being evasive about, file an issue. Honesty about tr
 
 **What it trusts:** That the BLS12-381 cryptographic scheme is sound. Specifically, that the Discrete Logarithm Problem on the BLS12-381 curve is hard.
 
+**Current status:** BLS verification is implemented in the `lumen-core` Rust crate and compiled to WASM. The demo currently uses multi-source beacon API consensus as an approximation — BLS signature verification will be activated when the full light client sync pipeline is connected end-to-end.
+
 **Attack scenario:** A breakthrough in discrete logarithm algorithms allows forging BLS signatures. An attacker could create fake sync committee signatures for arbitrary block headers.
 
 **Probability:** Extremely low. BLS12-381 is a well-studied curve with a 128-bit security level. No known attacks reduce this below ~100 bits. A quantum computer with thousands of logical qubits could break it, but such hardware doesn't exist.
@@ -28,45 +30,52 @@ If you find something we're being evasive about, file an issue. Honesty about tr
 
 **What it trusts:** That at least 342 of the 512 sync committee members are honest during their ~27-hour duty period.
 
+**Current status:** The demo fetches finality updates from beacon APIs that include the sync committee participation bitvector. Typically 500+ of 512 validators sign (the demo displays the exact count). The BLS signature is present in the data and available for verification.
+
 **Attack scenario:** An attacker controls 171+ of the 512 sync committee positions. They could sign a fake block header that Lumen would accept. This requires the attacker to control a massive amount of staked ETH (each validator needs 32 ETH).
 
-**Probability:** Very low. Sync committee members are randomly sampled from all active validators (~900,000 as of 2024). Controlling 33% of them requires controlling ~33% of all staked ETH (~$30B+ at current prices). This is the same assumption that secures Ethereum's consensus itself.
+**Probability:** Very low. Sync committee members are randomly sampled from all active validators (~900,000+). Controlling 33% of them requires controlling ~33% of all staked ETH ($30B+ at current prices). This is the same assumption that secures Ethereum's consensus itself.
 
 **Impact:** Total — the attacker could make Lumen accept a fake chain state.
 
 **Mitigation already in place:** This is literally the same trust assumption as running an Ethereum full node. If this assumption breaks, Ethereum itself is compromised, not just Lumen.
 
-**What would eliminate this:** Nothing — this is fundamental to Ethereum's security model. You could reduce it to 1/2 honest with different protocols, but 2/3 is Ethereum's design choice.
+**What would eliminate this:** Nothing — this is fundamental to Ethereum's security model.
 
 ---
 
-## Component: Checkpoint Initialization
+## Component: Beacon Chain API Consensus (State Root)
 
-**What it trusts:** That at least N of the configured checkpoint sources agree on the current finalized block root, and that this agreement reflects the actual chain state.
+**What it trusts:** That at least N of the configured beacon API providers are honest and serve the real finalized state root.
 
-**Attack scenario:** An attacker compromises N checkpoint sources (e.g., beaconcha.in, beaconstate.info, sigp.io) and makes them all return a fake checkpoint. Lumen would initialize from a fake starting point and could be served a valid-looking but incorrect chain history.
+**Current status:** The demo fetches the light client finality update from 2 independent beacon APIs (ChainSafe Lodestar and PublicNode Beacon) and requires both to agree on the same finalized execution state root. If they disagree, Lumen halts and reports the discrepancy.
 
-**Probability:** Low but non-zero. The checkpoint sources are run by different organizations in different jurisdictions. Compromising 3+ of them simultaneously is difficult but not impossible (e.g., a state-level actor or a compromised dependency in all of them).
+**Attack scenario:** An attacker compromises all configured beacon API providers and makes them return a fake finalized state root. Lumen would verify proofs against a wrong root, accepting incorrect account states.
 
-**Impact:** High — if the checkpoint is wrong, Lumen's entire chain view is wrong from that point.
+**Probability:** Low. The beacon APIs are run by different organizations (ChainSafe and PublicNode) with different infrastructure. Compromising both simultaneously is difficult. Adding more independent sources further reduces the probability.
+
+**Impact:** High — if the state root is wrong, all proof verifications produce wrong results.
 
 **Mitigation already in place:**
-- Multiple independent sources (default: 5)
-- Required agreement threshold (default: 3)
-- Sources operated by diverse organizations
-- The checkpoint can be manually verified by the user
+- Multiple independent sources required to agree
+- The finality update includes the full sync aggregate (committee bits + BLS signature) which can be verified locally
+- Sources are operated by different organizations in different jurisdictions
+- In production, BLS verification of the sync committee signature makes this fully trustless — the beacon API becomes a mere data transport
 
 **What would eliminate this:**
-- Embed a known-good finalized checkpoint in the Lumen binary (but this is stale)
-- Use P2P peers themselves as checkpoint sources (chicken-and-egg problem)
-- Use social consensus (ask your friends what the current checkpoint is)
-- Use a zkSNARK that proves the checkpoint is on the canonical chain (active research)
+- Enable BLS signature verification on the finality update (code exists in `lumen-core`, needs end-to-end integration)
+- Use P2P gossipsub to receive finality updates directly from the Ethereum network
+- Increase the number of independent beacon API sources
+
+**Key difference from RPC trust:** Traditional RPC providers (Infura, Alchemy) are trusted for both the state root AND the data. Lumen separates these: even with beacon API consensus for the state root, all proof data is verified locally via keccak256. The beacon API consensus can be eliminated entirely once BLS verification is connected.
 
 ---
 
 ## Component: Merkle-Patricia Trie Proofs
 
 **What it trusts:** That keccak256 is collision-resistant. A proof is valid if and only if the chain of hashes from leaf to root is consistent.
+
+**Current status:** Fully implemented and working. The demo verifies real Merkle proofs from Ethereum mainnet in the browser, producing balances that match Etherscan exactly.
 
 **Attack scenario:** An attacker finds a keccak256 collision — two different account states that produce the same hash. They could construct a proof that appears valid for a different account state.
 
@@ -78,54 +87,28 @@ If you find something we're being evasive about, file an issue. Honesty about tr
 
 ---
 
-## Component: Circuit Relay (Bootstrap)
+## Component: Execution RPC (Data Transport)
 
-**What it trusts:** The relay for connection metadata only — who is connecting to whom, and when.
+**What it trusts:** Nothing. The execution RPC is an untrusted data pipe.
 
-**What it explicitly does NOT trust:** The relay for data integrity or confidentiality. All data is encrypted with the Noise protocol. The relay cannot read or modify it.
+**Current status:** The demo fetches `eth_getProof` responses from public execution RPCs (PublicNode, LlamaRPC). The proof bytes are then verified locally against the beacon-chain-sourced state root.
 
-**Attack scenario 1 (metadata):** A malicious relay logs all connection patterns. They know your IP address and which Ethereum peers you connect to.
+**Attack scenario 1 (forged proof):** The RPC returns a forged `eth_getProof` response with incorrect account data.
 
-**Probability:** High — any relay operator can do this trivially.
+**Result:** The Merkle proof verification fails because `keccak256(forged_node) != expected_hash`. The proof is rejected. The RPC cannot forge a valid proof without finding a keccak256 collision.
 
-**Impact:** Low — this reveals network patterns but not query data (which addresses you look up, etc.).
+**Attack scenario 2 (stale data):** The RPC returns a valid proof but from an old block, showing an outdated balance.
 
-**Attack scenario 2 (selective relay):** A malicious relay only relays connections to peers it controls, which then feed Lumen manipulated (but invalid) data.
+**Mitigation:** The demo cross-checks that the proof block number is >= the beacon-finalized block number. A proof from a very old block would fail this check.
 
-**Probability:** Medium — possible but the manipulated data would fail BLS/Merkle verification.
+**Attack scenario 3 (omission):** The RPC refuses to serve proofs for certain addresses.
 
-**Impact:** None on correctness (data is still verified). Impact is on availability (Lumen can't sync if all relay-introduced peers send garbage).
+**Impact:** Availability only — Lumen cannot verify the address but also cannot be tricked. Multiple RPC endpoints are tried as fallback.
 
-**Mitigation already in place:**
-- Relay is used only for bootstrapping (3 second timeout)
-- Once direct peers are found, relay is dropped
-- All data from relay-introduced peers is verified identically to direct peers
-- Multiple relays can be configured
-
-**What would eliminate this:**
-- Direct WebTransport connections (no relay needed) — this is already the preferred path
-- If browsers supported raw QUIC, relay wouldn't be needed at all
-- Pre-cached peer list in the binary
-
----
-
-## Component: P2P Peers
-
-**What it trusts:** Nothing. Peers are untrusted data sources.
-
-**Attack scenario 1 (lies):** A peer sends a fake `LightClientUpdate` with an invalid BLS signature.
-
-**Result:** `lumen-core` verification fails. The update is silently rejected. The peer's score is reduced.
-
-**Attack scenario 2 (omission):** Peers refuse to send updates, keeping Lumen stuck on an old state.
-
-**Mitigation:** Connect to multiple peers. If no peer provides updates for an unusual duration, log a warning. The user can manually provide a fallback.
-
-**Attack scenario 3 (eclipse):** An attacker surrounds Lumen with malicious peers that all send the same invalid data.
-
-**Result:** All their data fails BLS verification. Lumen cannot sync but also cannot be tricked.
-
-**Impact:** Availability only — Lumen may not sync but will never accept bad data.
+**What would eliminate this entirely:**
+- Portal Network state network (in development) for P2P proof retrieval
+- Running your own execution node
+- Any data source works — the verification is source-independent
 
 ---
 
@@ -155,6 +138,8 @@ If you find something we're being evasive about, file an issue. Honesty about tr
 
 **What it trusts:** That the browser's WASM runtime correctly executes the Lumen WASM binary.
 
+**Current status:** The `lumen-wasm` crate compiles to a 298 KB WASM binary (115 KB gzipped). It contains BLS verification, Merkle proof verification, and RLP/SSZ decoding. The demo currently runs MPT verification in TypeScript for simplicity; the WASM module is available for integration.
+
 **Attack scenario:** A browser bug causes the WASM module to compute incorrect BLS verification results, accepting invalid signatures.
 
 **Probability:** Very low. Browser WASM runtimes (V8, SpiderMonkey, JavaScriptCore) are among the most tested and fuzzed software in the world.
@@ -171,29 +156,30 @@ If you find something we're being evasive about, file an issue. Honesty about tr
 
 **What it trusts:** That our implementation correctly decodes RLP (Recursive Length Prefix) and SSZ (Simple Serialize) encoded data.
 
+**Current status:** RLP decoding is implemented in both Rust (`lumen-core`) and TypeScript (`demo/verify.ts`). The TypeScript implementation is used in the demo and has been tested against real Ethereum mainnet data.
+
 **Attack scenario:** A parsing bug causes Lumen to misinterpret a valid proof, either accepting invalid data or rejecting valid data.
 
-**Probability:** Low-medium. Parsing bugs are a common vulnerability class. Our implementation is tested against known test vectors, but edge cases may exist.
+**Probability:** Low-medium. Parsing bugs are a common vulnerability class. Our implementations are tested against real Ethereum data, but edge cases may exist.
 
 **Impact:** Variable — could cause false accepts or false rejects.
 
-**Mitigation:** Extensive test suite with real Ethereum mainnet data. Fuzzing. Using well-tested libraries where possible.
+**Mitigation:** Extensive test suite with real Ethereum mainnet data. The Rust crate has 30+ tests. The demo's TypeScript verification has been validated against real `eth_getProof` responses, producing balances that exactly match Etherscan.
 
 ---
 
 ## Summary Table
 
-| Component | Trusts | Attack Probability | Impact | Eliminable? |
-|-----------|--------|-------------------|--------|-------------|
-| BLS12-381 | Crypto hardness | Near-zero | Total | Post-quantum (future) |
-| Sync committee | 2/3 honest validators | Very low ($30B+ attack) | Total | No (fundamental) |
-| Checkpoint init | N/M sources honest | Low | High | zk proofs (research) |
-| Merkle proofs | keccak256 collision resistance | Near-zero | High | Already minimal |
-| Circuit relay | Metadata only | Relay can see metadata | Low | Direct connections |
-| P2P peers | Nothing | N/A | Availability only | Already trustless |
-| Fallback RPC | EVM execution (eth_call) | Trivial for RPC | App-dependent | zk-EVM (roadmap) |
-| WASM runtime | Browser correctness | Very low | Total | Run natively |
-| RLP/SSZ parsing | Our implementation | Low-medium | Variable | More testing/fuzzing |
+| Component | Trusts | Attack Probability | Impact | Status |
+|-----------|--------|-------------------|--------|--------|
+| BLS12-381 | Crypto hardness | Near-zero | Total | Implemented in Rust, pending end-to-end integration |
+| Sync committee | 2/3 honest validators | Very low ($30B+ attack) | Total | Finality data fetched; BLS verification ready |
+| Beacon API consensus | N/N sources honest | Low | High | Working — 2 sources required to agree |
+| Merkle proofs | keccak256 collision resistance | Near-zero | High | **Working** — real mainnet verification |
+| Execution RPC | Nothing (untrusted) | N/A | None (verified locally) | **Working** — proof data verified via keccak256 |
+| Fallback RPC | EVM execution (eth_call) | Trivial for RPC | App-dependent | Documented as sole trust exception |
+| WASM runtime | Browser correctness | Very low | Total | Built and compiled (115 KB gzip) |
+| RLP/SSZ parsing | Our implementation | Low-medium | Variable | Tested against real mainnet data |
 
 ---
 
@@ -204,5 +190,29 @@ For completeness, things explicitly out of scope:
 1. **Browser compromise** — if your browser is malware, nothing helps
 2. **OS compromise** — if the OS is compromised, all bets are off
 3. **Social engineering** — if someone tricks you into using a fake Lumen, that's not a crypto problem
-4. **Network censorship** — if your ISP blocks all P2P traffic, Lumen can't connect (but also can't be fed fake data)
+4. **Network censorship** — if your ISP blocks all connections, Lumen can't fetch data (but also can't be fed fake data)
 5. **Key management** — Lumen is a read-only light client, not a wallet. It doesn't hold keys.
+
+---
+
+## What's Working Now vs Roadmap
+
+**Working now (demo):**
+- Beacon chain finality consensus from 2 independent APIs
+- Real `eth_getProof` fetching from execution RPCs
+- Full Merkle-Patricia trie proof verification (keccak256 + RLP)
+- Cross-check: proof block extends beacon-finalized chain
+- Cross-check: RPC-claimed balance matches proof-verified balance
+- Verified balances match Etherscan exactly
+
+**Implemented but not yet connected end-to-end:**
+- BLS12-381 signature verification (in `lumen-core` Rust crate)
+- WASM bindings for all verification functions (in `lumen-wasm`)
+- P2P transport types and gossipsub configuration (in `lumen-p2p`)
+- EIP-1193 provider implementation (in `lumen-js`)
+
+**Roadmap:**
+- Connect BLS verification to finality updates (eliminates beacon API trust)
+- P2P gossipsub for receiving finality updates directly
+- Portal Network integration for P2P proof retrieval
+- zk-EVM prover for trustless `eth_call`

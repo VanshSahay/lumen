@@ -410,7 +410,7 @@
           <div class="stat-value" id="sync-period">—</div>
         </div>
         <div class="stat-item">
-          <div class="stat-label">Connected Peers</div>
+          <div class="stat-label">Beacon Sources</div>
           <div class="stat-value" id="peer-count">0</div>
         </div>
         <div class="stat-item">
@@ -425,7 +425,7 @@
             <strong id="connection-type">Bootstrapping</strong>
           </div>
           <div class="connection-label" id="connection-detail">
-            Connecting to Ethereum P2P network...
+            Connecting to beacon chain APIs...
           </div>
         </div>
       </div>
@@ -437,9 +437,9 @@
         <h2>Verify Account Balance</h2>
       </div>
       <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1rem;">
-        Enter any Ethereum address to fetch and cryptographically verify its balance.
-        A Merkle proof is fetched from an untrusted RPC and verified locally using keccak256
-        against the finalized block's state root.
+        Enter any Ethereum address. State root from beacon chain consensus
+        (multi-source). Merkle proof fetched from an untrusted execution node
+        and verified locally via keccak256.
       </p>
       <div class="input-group">
         <input
@@ -474,29 +474,29 @@
         </thead>
         <tbody>
           <tr>
+            <td>State root</td>
+            <td class="trust-verified">Beacon Consensus</td>
+            <td>Multi-source beacon chain finality update</td>
+          </tr>
+          <tr>
             <td>eth_getBalance</td>
-            <td class="trust-verified">Fully Trustless</td>
-            <td>Merkle-Patricia trie proof</td>
+            <td class="trust-verified">Locally Verified</td>
+            <td>keccak256 Merkle-Patricia trie proof</td>
           </tr>
           <tr>
             <td>eth_getStorageAt</td>
-            <td class="trust-verified">Fully Trustless</td>
-            <td>Storage proof against account root</td>
+            <td class="trust-verified">Locally Verified</td>
+            <td>Storage proof against verified account root</td>
           </tr>
           <tr>
-            <td>eth_getCode</td>
-            <td class="trust-verified">Fully Trustless</td>
-            <td>Code hash in account proof</td>
-          </tr>
-          <tr>
-            <td>eth_blockNumber</td>
-            <td class="trust-verified">Fully Trustless</td>
-            <td>Verified beacon chain head</td>
+            <td>Proof data</td>
+            <td class="trust-verified">Untrusted Transport</td>
+            <td>From any RPC — verified locally, source irrelevant</td>
           </tr>
           <tr>
             <td>eth_call</td>
-            <td class="trust-warning">Trusted Execution</td>
-            <td>Requires RPC (EVM not provable w/o zk)</td>
+            <td class="trust-warning">Requires Trust</td>
+            <td>EVM execution not provable without zk-proofs</td>
           </tr>
         </tbody>
       </table>
