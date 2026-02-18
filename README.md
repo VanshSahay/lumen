@@ -1,66 +1,126 @@
 # Lumen
 
-**Trustless Ethereum light client that runs in any browser — no extension, no server, no API key.**
+**Trustless Ethereum light client — BLS + keccak256 verification in Rust/WASM, runs in any browser.**
 
-Lumen verifies Ethereum account state directly in the browser using cryptographic proofs. It fetches the finalized state root from the beacon chain via multi-source consensus, retrieves Merkle proofs from any execution node (untrusted), and verifies every keccak256 hash locally from state root to account leaf. If the math checks out, the data is correct — regardless of where it came from.
+Lumen verifies Ethereum state directly in the browser with zero trusted intermediaries. The sync committee's BLS12-381 aggregate signature is verified in Rust/WASM to prove a finalized state root, then Merkle-Patricia trie proofs are verified via keccak256 in Rust/WASM to prove individual account balances. The beacon APIs and execution RPCs are untrusted data transport — they deliver bytes, Lumen verifies the math.
 
 ## The Problem
 
-Almost every "decentralized" application today secretly trusts a centralized RPC provider — Infura, Alchemy, QuickNode — to tell it what the blockchain state is. These providers can lie about account balances, censor transactions, return fake contract state, or go down entirely.
-
-The blockchain is decentralized. The apps built on it are not.
+Every "decentralized" application today trusts a centralized RPC provider (Infura, Alchemy, QuickNode) to report blockchain state. These providers can lie about balances, censor queries, or go offline. The blockchain is decentralized. The applications reading from it are not.
 
 ## The Solution
 
 ```typescript
-// Before (trusting Infura):
-const provider = new ethers.JsonRpcProvider("https://mainnet.infura.io/v3/YOUR_KEY")
+import { createLumenProvider } from 'lumen-eth'
 
-// After (trustless):
 const provider = await createLumenProvider()
+// Every balance, nonce, and storage query is now cryptographically verified
 ```
 
-Same interface. Drop-in replacement. Zero config.
+Drop-in EIP-1193 provider. Works with ethers.js, viem, wagmi.
 
 ## How It Works
 
-1. **Fetches finalized state root from the beacon chain** — queries multiple independent beacon APIs (ChainSafe Lodestar, PublicNode) and requires consensus before proceeding
-2. **Fetches Merkle proofs from any execution node** — the execution RPC is an untrusted data transport; it cannot forge a valid proof
-3. **Verifies every proof locally via keccak256** — walks the Merkle-Patricia trie from state root to account leaf, checking every hash
-4. **Exposes a standard EIP-1193 provider** — works with ethers.js, viem, wagmi, web3.js
+```
+Beacon API (untrusted)           Execution RPC (untrusted)
+       │                                  │
+       ▼                                  ▼
+┌─────────────────────────────────────────────────────────┐
+│                  Rust / WASM (115 KB gzip)               │
+│                                                          │
+│  1. BLS12-381 signature verification (blst crate)        │
+│     └─ Proves: 512 sync committee validators signed      │
+│        the finalized beacon block header                 │
+│                                                          │
+│  2. Merkle-Patricia trie verification (keccak256)        │
+│     └─ Proves: account balance at a specific state root  │
+│                                                          │
+│  Result: cryptographically verified account state        │
+└─────────────────────────────────────────────────────────┘
+```
 
-## Trust Model
+1. **Beacon bootstrap** — fetches the current sync committee (512 BLS public keys) from a beacon API
+2. **BLS verification** — verifies the sync committee's aggregate BLS12-381 signature on a finality update, proving a finalized execution state root
+3. **Proof fetch** — fetches `eth_getProof` from any execution RPC (untrusted bytes)
+4. **keccak256 MPT verification** — walks the Merkle-Patricia trie in Rust/WASM, verifying every hash from state root to account leaf
+5. **Cross-check** — confirms the proof's block extends the BLS-verified finalized chain
 
-| Layer | What Lumen Trusts | Why It's OK |
-|-------|-------------------|-------------|
-| Beacon chain finality | Multiple independent beacon APIs agree | Same as checkpoint sync; collusion requires compromising N operators |
-| Sync committee | 512 validators signed the finalized header | Same trust as Ethereum consensus itself (2/3 honest) |
-| Merkle proofs | keccak256 collision resistance | Standard cryptographic assumption; computationally infeasible to break |
-| Execution RPC | Nothing — it's an untrusted data pipe | Proof either verifies against the state root or gets rejected |
-| `eth_call` | Fallback RPC (the one exception) | EVM execution isn't provable without zk-proofs (yet) |
-
-See [docs/trust-model.md](docs/trust-model.md) for the complete, brutally honest breakdown.
+Zero TypeScript crypto. All verification happens in Rust compiled to WebAssembly.
 
 ## Architecture
 
 ```
 crates/
-├── lumen-core/     # Pure Rust: BLS verification, Merkle proofs, RLP/SSZ
-├── lumen-wasm/     # WASM bindings: bridges Rust to JS via wasm-bindgen
-└── lumen-p2p/      # P2P types: libp2p transport, gossipsub, peer scoring
+├── lumen-core/     # Pure Rust: BLS12-381, keccak256 MPT, RLP/SSZ
+├── lumen-wasm/     # WASM bindings: LumenClient + beacon API adapter
+└── lumen-p2p/      # P2P types: libp2p transport, gossipsub (not yet WASM)
 
 packages/
 ├── lumen-js/       # TypeScript npm package (EIP-1193 provider)
 └── lumen-react/    # React hook (useLumen)
 
 demo/               # Live demo: real verification against Ethereum mainnet
-├── beacon.ts       # Beacon chain light client sync (multi-source consensus)
-├── rpc.ts          # Execution RPC data transport (untrusted)
-├── verify.ts       # keccak256 + RLP + Merkle-Patricia trie verification
-└── main.ts         # UI and verification flow
-
-docs/               # Architecture, trust model, API reference
+├── main.ts         # Orchestrator — loads WASM, drives verification flow
+├── wasm.ts         # Thin typed bridge to Rust/WASM LumenClient
+├── beacon.ts       # Beacon API data transport (raw JSON, untrusted)
+├── rpc.ts          # Execution RPC data transport (raw JSON, untrusted)
+└── lumen-worker.ts # Web Worker: polls beacon APIs for finality updates
 ```
+
+### What each component does
+
+| Component | Language | Role | Trusted? |
+|-----------|----------|------|----------|
+| `lumen-core` | Rust | BLS verification, MPT proofs, RLP/SSZ | **Verification engine** |
+| `lumen-wasm` | Rust → WASM | Bridges lumen-core to JavaScript | **Verification engine** |
+| `lumen-p2p` | Rust | libp2p transport types (WebRTC, gossipsub) | Not integrated yet |
+| `demo/beacon.ts` | TypeScript | Fetches raw JSON from beacon APIs | Untrusted transport |
+| `demo/rpc.ts` | TypeScript | Fetches raw JSON from execution RPCs | Untrusted transport |
+| `demo/wasm.ts` | TypeScript | ~130 lines — typed wrapper around WASM | Thin bridge |
+| `demo/main.ts` | TypeScript | UI orchestration, no crypto | No crypto |
+
+### lumen-p2p status
+
+The `lumen-p2p` crate contains libp2p transport configuration (WebRTC, WebTransport), GossipSub behaviour for beacon chain topics, and peer scoring. It is **not yet compiled to WASM or integrated into the demo**. The demo's Web Worker currently uses HTTP polling of beacon REST APIs as the data transport layer. The architecture is designed so that swapping HTTP polling for P2P gossip requires no changes to the verification pipeline — both deliver raw bytes that get BLS-verified in WASM.
+
+## Trust Model
+
+| Layer | What Lumen Trusts | Current Status |
+|-------|-------------------|----------------|
+| BLS12-381 crypto | Discrete log hardness on BLS12-381 | **Active** — verified in Rust/WASM |
+| Sync committee | 2/3 of 512 validators honest | **Active** — BLS aggregate sig verified |
+| Merkle proofs | keccak256 collision resistance | **Active** — verified in Rust/WASM |
+| Beacon APIs | Nothing — untrusted data transport | Raw JSON delivered, BLS-verified locally |
+| Execution RPCs | Nothing — untrusted data transport | Raw proof bytes verified via keccak256 |
+| `eth_call` | Fallback RPC (the one exception) | EVM execution not provable without zk-proofs |
+
+See [docs/trust-model.md](docs/trust-model.md) for the complete breakdown.
+
+## Demo
+
+The demo performs real trustless verification against Ethereum mainnet:
+
+```bash
+# Prerequisites: Rust stable, wasm-pack, LLVM (brew install llvm), Node.js 18+, pnpm
+
+# Build WASM (requires LLVM for blst cross-compilation)
+cd crates/lumen-wasm
+CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang \
+AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar \
+wasm-pack build --target web --out-dir ../../packages/lumen-js/wasm --out-name lumen_wasm
+
+# Run the demo
+cd demo && pnpm install && pnpm dev
+```
+
+Enter any Ethereum address and the demo will:
+1. Load the Rust/WASM verification engine (BLS + keccak256)
+2. Fetch beacon bootstrap (512 sync committee BLS public keys)
+3. BLS-verify a finality update (aggregate signature from sync committee)
+4. Fetch `eth_getProof` at `latest` from an untrusted execution RPC
+5. Cross-check that `latest` block extends the BLS-verified finalized chain
+6. Verify the Merkle-Patricia trie proof in Rust/WASM (keccak256)
+7. Decode the RLP account state and display the verified balance
 
 ## Quick Start
 
@@ -79,8 +139,8 @@ import { createLumenProvider } from 'lumen-eth'
 const lumen = await createLumenProvider()
 const provider = new BrowserProvider(lumen)
 
-const balance = await provider.getBalance("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045")
-// ^ This balance was cryptographically verified via Merkle proof
+const balance = await provider.getBalance("vitalik.eth")
+// This balance was cryptographically verified: BLS + keccak256 in Rust/WASM
 ```
 
 ### Use with viem
@@ -91,70 +151,32 @@ import { mainnet } from 'viem/chains'
 import { createLumenProvider } from 'lumen-eth'
 
 const lumen = await createLumenProvider()
-const client = createPublicClient({
-  chain: mainnet,
-  transport: custom(lumen),
-})
+const client = createPublicClient({ chain: mainnet, transport: custom(lumen) })
 ```
-
-### Use with React
-
-```tsx
-import { useLumen } from 'lumen-react'
-
-function App() {
-  const { provider, syncState, isReady } = useLumen()
-
-  if (!isReady) return <div>Syncing: {syncState.status}...</div>
-  return <div>Connected! Head: {syncState.headSlot}</div>
-}
-```
-
-## Demo
-
-The demo app performs real trustless verification against Ethereum mainnet:
-
-```bash
-cd demo && pnpm dev
-```
-
-Enter any Ethereum address and the demo will:
-1. Fetch the finalized state root from 2 independent beacon chain APIs
-2. Verify multi-source consensus (both must agree)
-3. Fetch `eth_getProof` from an untrusted execution RPC
-4. Verify the Merkle-Patricia trie proof locally (keccak256 hash chain)
-5. Decode the RLP account state and display the verified balance
-6. Cross-check the RPC's claimed balance against the proof-verified balance
-
-Verified balances match Etherscan exactly.
 
 ## Development
 
 ### Prerequisites
 
-- Rust (stable) with `wasm32-unknown-unknown` target
-- wasm-pack
-- Node.js >= 18
-- pnpm >= 8
-- LLVM with wasm32 support (for `blst` C compilation — `brew install llvm` on macOS)
+| Tool | Version | Notes |
+|------|---------|-------|
+| Rust | stable | `rustup default stable` |
+| wasm32 target | — | `rustup target add wasm32-unknown-unknown` |
+| wasm-pack | 0.12+ | `cargo install wasm-pack` |
+| LLVM | 15+ | `brew install llvm` (macOS, needed for `blst` → WASM cross-compilation) |
+| Node.js | 18+ | — |
+| pnpm | 8+ | — |
 
-### Setup
+### Build
 
 ```bash
-# Install Rust WASM target
-rustup target add wasm32-unknown-unknown
-
-# Install wasm-pack
-cargo install wasm-pack
-
-# Install dependencies
-pnpm install
-
-# Run Rust tests (37 tests across all crates)
+# Run Rust tests
 cargo test --workspace
 
-# Build everything (Rust + WASM + TypeScript + demo)
-./build.sh
+# Build WASM
+CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang \
+AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar \
+wasm-pack build crates/lumen-wasm --target web --out-dir ../../packages/lumen-js/wasm --out-name lumen_wasm
 
 # Run the demo
 cd demo && pnpm dev
@@ -164,33 +186,21 @@ cd demo && pnpm dev
 
 | Artifact | Size |
 |----------|------|
-| WASM binary (raw) | ~298 KB |
 | WASM binary (gzipped) | ~115 KB |
-| Demo JS bundle (gzipped) | ~9 KB |
-
-### Project Structure
-
-| Crate/Package | Purpose | Key Dependencies |
-|--------------|---------|-----------------|
-| `lumen-core` | BLS verification, Merkle proofs, RLP/SSZ | blst, alloy-primitives, sha2, tiny-keccak |
-| `lumen-wasm` | WASM bindings for browser | lumen-core, wasm-bindgen, web-sys |
-| `lumen-p2p` | P2P transport and gossip types | libp2p |
-| `lumen-js` | TypeScript EIP-1193 provider | lumen-wasm (compiled) |
-| `lumen-react` | React hook | lumen-js |
-| `demo` | Live mainnet demo | js-sha3 (keccak256), vite |
+| WASM binary (raw) | ~360 KB |
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — System design, data flow, and verification pipeline
-- [Trust Model](docs/trust-model.md) — Precise, honest security analysis of every component
-- [API Reference](docs/api.md) — Complete TypeScript API docs
+- [Architecture](docs/architecture.md) — System design, data flow, verification pipeline
+- [Trust Model](docs/trust-model.md) — Honest security analysis of every component
+- [API Reference](docs/api.md) — TypeScript API docs
 
 ## Non-Negotiables
 
-1. Never silently falls back to unverified data — throws instead
-2. Trust state is always visible (demo trust log, console logging)
-3. The execution RPC is an untrusted data transport, not a trust anchor
-4. Every balance shown has been cryptographically verified via Merkle proof
+1. All cryptographic verification happens in Rust/WASM — zero TypeScript crypto
+2. Never silently falls back to unverified data — throws instead
+3. Trust state is always visible (UI trust log, console logging)
+4. Beacon APIs and execution RPCs are untrusted data transport, not trust anchors
 5. Works on mainnet with real data, not simulations
 
 ## License

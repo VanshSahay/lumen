@@ -152,3 +152,37 @@ export function isSynced(): boolean {
 export function isReady(): boolean {
   return wasmReady && client !== null;
 }
+
+// --- Types for the all-in-one verify method ---
+
+export interface FetchVerifyResult {
+  nonce: number;
+  balance_hex: string;
+  storage_root: string;
+  code_hash: string;
+  is_contract: boolean;
+  verified: boolean;
+  finalized_block: number;
+  proof_block: number;
+  proof_nodes_verified: number;
+  rpc_endpoint: string;
+  rpc_claimed_balance: string;
+}
+
+/**
+ * Fetch a Merkle proof from an execution RPC and verify it — all in Rust/WASM.
+ *
+ * This is the "one call" method: the WASM module handles the HTTP fetch,
+ * keccak256 verification, RLP decoding, and cross-check. The TypeScript
+ * side provides only the address and RPC endpoint list.
+ */
+export async function fetchAndVerifyAccount(
+  address: string,
+  rpcEndpoints: string[],
+): Promise<FetchVerifyResult> {
+  if (!client) throw new Error('Client not initialized');
+  return (await client.fetch_and_verify_account(
+    address,
+    JSON.stringify(rpcEndpoints),
+  )) as FetchVerifyResult;
+}

@@ -572,6 +572,61 @@ impl LumenClient {
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
 
+    /// Fetch an account's Merkle proof from an execution RPC and verify it.
+    ///
+    /// This is the "one call does everything" method. It:
+    /// 1. POSTs eth_getBlockByNumber("latest") to get the state root
+    /// 2. POSTs eth_getProof(address, [], "latest") to get the proof
+    /// 3. Verifies the proof via keccak256 MPT in Rust
+    /// 4. Cross-checks: latest block ≥ BLS-verified finalized block
+    /// 5. Returns the verified account state
+    ///
+    /// The RPC endpoints are tried in order. All data from RPCs is untrusted
+    /// and verified locally.
+    pub async fn fetch_and_verify_account(
+        &self,
+        address: &str,
+        rpc_endpoints_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        let endpoints: Vec<String> = serde_json::from_str(rpc_endpoints_json)
+            .map_err(|e| JsValue::from_str(&format!("Invalid endpoints JSON: {}", e)))?;
+
+        if endpoints.is_empty() {
+            return Err(JsValue::from_str("No RPC endpoints provided"));
+        }
+
+        let finalized_block_num = self
+            .state
+            .latest_execution_payload_header
+            .as_ref()
+            .map(|h| h.block_number)
+            .unwrap_or(0);
+
+        let mut last_error = String::from("No endpoints tried");
+
+        for endpoint in &endpoints {
+            match self
+                .try_fetch_and_verify(endpoint, address, finalized_block_num)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    let msg = e.as_string().unwrap_or_default();
+                    log_to_console(&format!(
+                        "[Lumen] RPC {} failed: {}",
+                        endpoint, msg
+                    ));
+                    last_error = msg;
+                }
+            }
+        }
+
+        Err(JsValue::from_str(&format!(
+            "All RPC endpoints failed. Last error: {}",
+            last_error
+        )))
+    }
+
     /// Get the execution state info for the TypeScript layer.
     pub fn get_execution_state(&self) -> Result<JsValue, JsValue> {
         let exec_state = ExecutionStateResponse {
@@ -650,6 +705,163 @@ struct ExecutionStateResponse {
     state_root: String,
     block_number: u64,
     finalized_slot: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FetchVerifyAccountResult {
+    nonce: u64,
+    balance_hex: String,
+    storage_root: String,
+    code_hash: String,
+    is_contract: bool,
+    verified: bool,
+    finalized_block: u64,
+    proof_block: u64,
+    proof_nodes_verified: usize,
+    rpc_endpoint: String,
+    rpc_claimed_balance: String,
+}
+
+// --- Private helpers ---
+
+impl LumenClient {
+    async fn try_fetch_and_verify(
+        &self,
+        endpoint: &str,
+        address: &str,
+        finalized_block_num: u64,
+    ) -> Result<JsValue, JsValue> {
+        // 1. Fetch latest block header (state root)
+        let block_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getBlockByNumber",
+            "params": ["latest", false]
+        });
+        let block_resp_text = network::post_json(endpoint, &block_req.to_string())
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Block fetch: {}", e)))?;
+
+        let block_resp: serde_json::Value = serde_json::from_str(&block_resp_text)
+            .map_err(|e| JsValue::from_str(&format!("Block JSON parse: {}", e)))?;
+
+        if let Some(err) = block_resp.get("error") {
+            return Err(JsValue::from_str(&format!("Block RPC error: {}", err)));
+        }
+
+        let block_result = block_resp
+            .get("result")
+            .and_then(|r| if r.is_null() { None } else { Some(r) })
+            .ok_or_else(|| JsValue::from_str("Block result is null"))?;
+
+        let state_root_hex = block_result
+            .get("stateRoot")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsValue::from_str("No stateRoot in block"))?;
+
+        let block_num_hex = block_result
+            .get("number")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsValue::from_str("No number in block"))?;
+
+        let block_num = u64::from_str_radix(
+            block_num_hex.strip_prefix("0x").unwrap_or(block_num_hex),
+            16,
+        )
+        .map_err(|e| JsValue::from_str(&format!("Block number parse: {}", e)))?;
+
+        // 2. Cross-check: latest block must extend finalized chain
+        if block_num < finalized_block_num {
+            return Err(JsValue::from_str(&format!(
+                "RPC latest block {} < finalized block {}",
+                block_num, finalized_block_num
+            )));
+        }
+
+        // 3. Fetch proof at latest
+        let proof_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "eth_getProof",
+            "params": [address, [], "latest"]
+        });
+        let proof_resp_text = network::post_json(endpoint, &proof_req.to_string())
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Proof fetch: {}", e)))?;
+
+        let proof_resp: serde_json::Value = serde_json::from_str(&proof_resp_text)
+            .map_err(|e| JsValue::from_str(&format!("Proof JSON parse: {}", e)))?;
+
+        if let Some(err) = proof_resp.get("error") {
+            return Err(JsValue::from_str(&format!("Proof RPC error: {}", err)));
+        }
+
+        let proof_result = proof_resp
+            .get("result")
+            .and_then(|r| if r.is_null() { None } else { Some(r) })
+            .ok_or_else(|| JsValue::from_str("Proof result is null"))?;
+
+        let proof_json = proof_result.to_string();
+
+        // 4. Parse state root
+        let root_hex = state_root_hex
+            .strip_prefix("0x")
+            .unwrap_or(state_root_hex);
+        let root_bytes = hex::decode(root_hex)
+            .map_err(|e| JsValue::from_str(&format!("State root hex: {}", e)))?;
+        if root_bytes.len() != 32 {
+            return Err(JsValue::from_str("State root must be 32 bytes"));
+        }
+        let mut state_root = [0u8; 32];
+        state_root.copy_from_slice(&root_bytes);
+
+        // 5. Parse address
+        let addr_hex = address.strip_prefix("0x").unwrap_or(address);
+        let addr_bytes = hex::decode(addr_hex)
+            .map_err(|e| JsValue::from_str(&format!("Address hex: {}", e)))?;
+        if addr_bytes.len() != 20 {
+            return Err(JsValue::from_str("Address must be 20 bytes"));
+        }
+        let mut addr = [0u8; 20];
+        addr.copy_from_slice(&addr_bytes);
+
+        // 6. Parse proof and verify via keccak256 MPT
+        let rpc_proof: beacon_api::RpcGetProofResponse =
+            serde_json::from_str(&proof_json)
+                .map_err(|e| JsValue::from_str(&format!("Proof parse: {}", e)))?;
+
+        let account_proof = rpc_proof
+            .to_core_account_proof(&addr)
+            .map_err(|e| JsValue::from_str(&format!("Proof conversion: {}", e)))?;
+
+        let proof_node_count = account_proof.proof.len();
+
+        let account =
+            lumen_core::execution::proof::verify_account_proof(state_root, addr, &account_proof)
+                .map_err(|e| JsValue::from_str(&format!("Proof verification: {}", e)))?;
+
+        log_to_console(&format!(
+            "[Lumen] Account {} verified at block #{}: {} nodes, balance=0x{}",
+            address, block_num, proof_node_count, hex::encode(account.balance)
+        ));
+
+        let result = FetchVerifyAccountResult {
+            nonce: account.nonce,
+            balance_hex: format!("0x{}", account.balance_hex()),
+            storage_root: format!("0x{}", hex::encode(account.storage_root)),
+            code_hash: format!("0x{}", hex::encode(account.code_hash)),
+            is_contract: account.is_contract(),
+            verified: true,
+            finalized_block: finalized_block_num,
+            proof_block: block_num,
+            proof_nodes_verified: proof_node_count,
+            rpc_endpoint: endpoint.to_string(),
+            rpc_claimed_balance: rpc_proof.balance.clone(),
+        };
+
+        serde_wasm_bindgen::to_value(&result)
+            .map_err(|e| JsValue::from_str(&format!("Serialization: {}", e)))
+    }
 }
 
 // --- Console logging ---

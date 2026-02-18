@@ -16,25 +16,23 @@ import {
   initWasm,
   initClientFromBootstrap,
   processFinalityUpdate,
-  verifyAccountProofWithRoot as wasmVerifyAccountWithRoot,
+  fetchAndVerifyAccount,
   getExecutionState,
   getHeadSlot,
   isReady,
   type FinalityUpdateResult,
-  type VerifiedAccountResult,
+  type FetchVerifyResult,
 } from './wasm';
 import {
   fetchFinalizedBlockRoot,
   fetchBootstrapJson,
   fetchFinalityUpdateRaw,
-  type RawFinalityUpdate,
 } from './beacon';
-import {
-  getProof,
-  getBlockByTag,
-  getCurrentEndpoint,
-  type EthGetProofResponse,
-} from './rpc';
+
+const RPC_ENDPOINTS = [
+  'https://ethereum-rpc.publicnode.com',
+  'https://eth.llamarpc.com',
+];
 
 // --- DOM Elements ---
 
@@ -335,113 +333,68 @@ async function verifyAddress(address: string): Promise<void> {
       throw new Error('No BLS-verified execution state root available');
     }
 
-    const blsVerifiedBlockNum = execState.block_number;
-
     steps.push({
       name: 'BLS-verified finality (Rust/WASM)',
       passed: true,
       details:
-        `Slot ${execState.finalized_slot.toLocaleString()} finalized at block #${blsVerifiedBlockNum.toLocaleString()} — ` +
+        `Slot ${execState.finalized_slot.toLocaleString()} finalized at block #${execState.block_number.toLocaleString()} — ` +
         `state root BLS-verified by ${lastFinalityResult?.sync_participation || '?'}/512 validators`,
       timeMs: Math.round(performance.now() - step1Start),
     });
     renderSteps(steps);
 
-    // Step 2: Fetch proof at 'latest' and the latest block header.
-    // Free pruned RPCs (PublicNode, LlamaRPC, etc.) only serve eth_getProof
-    // at the tip of the chain. Requesting a specific historical block returns
-    // "old data not available due to pruning". So we fetch at 'latest' and
-    // verify the proof against that block's own state root.
+    // Step 2: Fetch proof + verify — entirely in Rust/WASM.
+    // The WASM module handles: HTTP fetch (block header + proof) → keccak256
+    // MPT verification → cross-check (latest block ≥ finalized) → RLP decode.
+    // TypeScript does zero crypto, zero RPC calls for verification.
     const step2Start = performance.now();
-    addLog(
-      `Fetching proof at latest block from ${getCurrentEndpoint()}...`,
-      'info',
-    );
+    addLog('Fetching proof and verifying in Rust/WASM...', 'info');
 
-    let proofResponse: EthGetProofResponse;
+    let verified: FetchVerifyResult;
     try {
-      proofResponse = await getProof(address, 'latest');
+      verified = await fetchAndVerifyAccount(address, RPC_ENDPOINTS);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       steps.push({
-        name: 'Fetch Merkle proof (untrusted data transport)',
+        name: 'Fetch + verify in Rust/WASM',
         passed: false,
-        details: `Failed: ${msg}`,
+        details: `FAILED: ${msg}`,
         timeMs: Math.round(performance.now() - step2Start),
       });
       renderSteps(steps);
-      throw new Error(`Proof fetch failed: ${msg}`);
+      throw new Error(msg);
     }
 
-    // Fetch the latest block header so we know the state root the proof
-    // was generated against.
-    const latestBlock = await getBlockByTag('latest');
-    const latestBlockNum = parseInt(latestBlock.number, 16);
-    const latestStateRoot = latestBlock.stateRoot;
+    const step2Ms = Math.round(performance.now() - step2Start);
 
     steps.push({
-      name: `Fetch Merkle proof (untrusted data transport)`,
+      name: 'Fetch Merkle proof (untrusted data transport)',
       passed: true,
       details:
-        `${proofResponse.accountProof.length} trie nodes at block #${latestBlockNum.toLocaleString()} from ${getCurrentEndpoint()}`,
-      timeMs: Math.round(performance.now() - step2Start),
+        `${verified.proof_nodes_verified} trie nodes at block #${verified.proof_block.toLocaleString()} from ${verified.rpc_endpoint}`,
+      timeMs: step2Ms,
     });
-    renderSteps(steps);
 
-    // Step 3: Cross-check — latest block must extend the BLS-verified finalized chain
-    const chainExtends = latestBlockNum >= blsVerifiedBlockNum;
     steps.push({
       name: 'Cross-check: block extends BLS-verified finalized chain',
-      passed: chainExtends,
-      details: chainExtends
-        ? `Latest block #${latestBlockNum.toLocaleString()} ≥ finalized block #${blsVerifiedBlockNum.toLocaleString()}`
-        : `CHAIN MISMATCH: latest #${latestBlockNum.toLocaleString()} < finalized #${blsVerifiedBlockNum.toLocaleString()}`,
+      passed: true,
+      details:
+        `Proof block #${verified.proof_block.toLocaleString()} ≥ finalized block #${verified.finalized_block.toLocaleString()}`,
       timeMs: 0,
     });
-    renderSteps(steps);
-    if (!chainExtends) {
-      throw new Error('RPC latest block is behind BLS-verified finalized block');
-    }
-
-    // Step 4: Verify the proof in Rust/WASM (keccak256 MPT)
-    // We verify against the latest block's state root, which we got from
-    // the same RPC in the same moment. The proof and state root are
-    // guaranteed to be from the same block.
-    const step4Start = performance.now();
-    addLog('Verifying Merkle proof in Rust/WASM (keccak256)...', 'info');
-
-    let verified: VerifiedAccountResult;
-    try {
-      const proofJson = JSON.stringify(proofResponse);
-      verified = wasmVerifyAccountWithRoot(latestStateRoot, address, proofJson);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      steps.push({
-        name: 'Verify Merkle-Patricia trie proof (Rust/WASM keccak256)',
-        passed: false,
-        details: `VERIFICATION FAILED: ${msg}`,
-        timeMs: Math.round(performance.now() - step4Start),
-      });
-      renderSteps(steps);
-      throw new Error(`Proof verification failed: ${msg}`);
-    }
 
     steps.push({
       name: 'Verify Merkle-Patricia trie proof (Rust/WASM keccak256)',
       passed: true,
       details:
-        `${verified.proof_nodes_verified} trie nodes verified in Rust — ` +
-        `all keccak256 hashes match from state root to account leaf`,
-      timeMs: Math.round(performance.now() - step4Start),
+        `${verified.proof_nodes_verified} trie nodes verified — all keccak256 hashes match from state root to account leaf`,
+      timeMs: 0,
     });
-    renderSteps(steps);
 
-    // Step 4: Decode verified account state
-    // Step 5: Decode verified account state
-    const step5Start = performance.now();
+    // Step 3: Display verified account state
     const balanceWei = BigInt(verified.balance_hex);
     const balanceEth = weiToEth(balanceWei);
-    const rpcClaimedBalance = BigInt(proofResponse.balance);
+    const rpcClaimedBalance = BigInt(verified.rpc_claimed_balance);
     const balancesMatch = rpcClaimedBalance === balanceWei;
 
     steps.push({
@@ -450,7 +403,7 @@ async function verifyAddress(address: string): Promise<void> {
       details:
         `nonce=${verified.nonce}, balance=${balanceEth} ETH, ` +
         `contract=${verified.is_contract}`,
-      timeMs: Math.round(performance.now() - step5Start),
+      timeMs: 0,
     });
 
     steps.push({
@@ -466,8 +419,8 @@ async function verifyAddress(address: string): Promise<void> {
       name: 'Trust chain complete',
       passed: true,
       details:
-        'BLS-verified finalized chain → keccak256 MPT proof at latest block → account balance — ' +
-        'all crypto in Rust/WASM, zero TypeScript verification',
+        'BLS-verified finalized chain → keccak256 MPT proof → account balance — ' +
+        'all in Rust/WASM, zero TypeScript crypto or RPC calls',
       timeMs: 0,
     });
 

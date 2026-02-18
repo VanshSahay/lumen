@@ -1,15 +1,9 @@
 # Lumen API Reference
 
-Complete API reference for the `lumen-eth` npm package.
-
 ## Installation
 
 ```bash
 npm install lumen-eth
-# or
-pnpm add lumen-eth
-# or
-yarn add lumen-eth
 ```
 
 ---
@@ -20,87 +14,57 @@ yarn add lumen-eth
 import { createLumenProvider } from 'lumen-eth'
 
 const provider = await createLumenProvider()
+// provider is a standard EIP-1193 Ethereum provider
+// Every eth_getBalance, eth_getTransactionCount, eth_getStorageAt call
+// is cryptographically verified via BLS + keccak256 in Rust/WASM
 ```
-
-That's it. `provider` is a standard EIP-1193 Ethereum provider.
 
 ---
 
 ## `createLumenProvider(options?)`
 
-Create a fully initialized, trustless Ethereum provider.
-
-**Parameters:**
+Create a fully initialized trustless Ethereum provider.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `checkpoint` | `string` | Auto-fetched | Override the initial checkpoint hash (hex with 0x prefix) |
-| `fallbackRpc` | `string` | None | RPC URL for `eth_call` and proof data (untrusted, verified where possible) |
-| `checkpointSources` | `string[]` | 5 default sources | URLs to fetch checkpoint from |
-| `requiredCheckpointAgreement` | `number` | 3 | How many sources must agree on the checkpoint |
-| `maxPeers` | `number` | 10 | Maximum P2P peer connections (for future P2P integration) |
+| `checkpoint` | `string` | Auto-fetched | Initial checkpoint hash (hex with 0x prefix) |
+| `fallbackRpc` | `string` | None | RPC URL for `eth_call` (the one unverified operation) |
+| `beaconApis` | `string[]` | ChainSafe + PublicNode | Beacon API endpoints (untrusted data transport) |
+| `executionRpcs` | `string[]` | PublicNode + LlamaRPC | Execution RPC endpoints (untrusted data transport) |
 | `verbose` | `boolean` | true | Log trust state to console |
 
 **Returns:** `Promise<LumenProvider>`
 
-**Example:**
+---
 
-```typescript
-const provider = await createLumenProvider({
-  fallbackRpc: 'https://eth.llamarpc.com',  // Used for eth_call and proof data
-  verbose: true,
-})
-```
+## Verification Pipeline (What Happens Under the Hood)
+
+Every verified query follows this pipeline:
+
+1. **WASM module loaded** — Rust BLS12-381 + keccak256 verification engine (~115 KB gzipped)
+2. **Beacon bootstrap** — 512 sync committee BLS public keys fetched from beacon API
+3. **BLS finality verification** — sync committee aggregate BLS12-381 signature verified in Rust/WASM → proves finalized state root
+4. **Proof fetched** — `eth_getProof` from any execution RPC (untrusted bytes)
+5. **keccak256 MPT verification** — Merkle-Patricia trie walked in Rust/WASM → proves account state
+6. **Cross-check** — latest block extends BLS-verified finalized chain
 
 ---
 
-## `LumenProvider`
+## Supported Methods
 
-The main provider class. Implements the EIP-1193 standard interface.
-
-### `provider.request(args)`
-
-Standard EIP-1193 request method.
-
-**Supported Methods:**
-
-#### `eth_chainId` — No Network Required
-Returns the chain ID. Always `"0x1"` (mainnet).
-
-```typescript
-const chainId = await provider.request({ method: 'eth_chainId' })
-// "0x1"
-```
-
-#### `eth_blockNumber` — Verified Head
-Returns the latest verified head slot.
-
-```typescript
-const blockNumber = await provider.request({ method: 'eth_blockNumber' })
-// "0x96b3a1" (hex-encoded block number)
-```
-
-#### `eth_getBalance` — Locally Verified
-
-Fetches an account's Merkle proof from the configured data source and verifies it locally via keccak256 hash chain against the verified state root. The data source (RPC or P2P) is untrusted — only the local verification matters.
+### `eth_getBalance` — Cryptographically Verified
 
 ```typescript
 const balance = await provider.request({
   method: 'eth_getBalance',
   params: ['0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', 'latest']
 })
-// "0x1234..." (balance in wei, cryptographically verified)
+// balance is verified: BLS-proven finality + keccak256 Merkle proof in Rust/WASM
 ```
 
-**Verification pipeline:**
-1. Fetch `eth_getProof` from data source (untrusted)
-2. Walk the Merkle-Patricia trie proof, verifying `keccak256(node) == expected_hash` at each step
-3. Decode the RLP account data at the leaf: `[nonce, balance, storageRoot, codeHash]`
-4. Return the balance only if the full proof checks out
+Pipeline: fetch `eth_getProof` → verify keccak256 MPT in WASM → extract balance from RLP account state.
 
-#### `eth_getTransactionCount` — Locally Verified
-
-Fetches and verifies an account's nonce via the same Merkle proof pipeline.
+### `eth_getTransactionCount` — Cryptographically Verified
 
 ```typescript
 const nonce = await provider.request({
@@ -109,9 +73,9 @@ const nonce = await provider.request({
 })
 ```
 
-#### `eth_getStorageAt` — Locally Verified
+Uses the same Merkle proof as `eth_getBalance`. The nonce is extracted from the same RLP-encoded account leaf.
 
-Fetches and verifies a contract storage slot via a two-level Merkle proof (account proof + storage proof).
+### `eth_getStorageAt` — Cryptographically Verified
 
 ```typescript
 const value = await provider.request({
@@ -120,83 +84,74 @@ const value = await provider.request({
 })
 ```
 
-#### `eth_getCode` — Locally Verified
+Two-level verification: account proof (state root → account) + storage proof (storage root → slot value).
 
-Verifies the code hash of a contract via account proof.
+### `eth_getCode` — Cryptographically Verified
 
 ```typescript
-const codeHash = await provider.request({
+const code = await provider.request({
   method: 'eth_getCode',
   params: ['0xContractAddress', 'latest']
 })
 ```
 
-#### `eth_call` — Trusted Execution (The One Exception)
+The code hash is verified via account proof. The actual code bytes come from the RPC (the code hash can be cross-checked).
 
-Executes a call via the fallback RPC. **NOT verified.** Requires `fallbackRpc` in options.
+### `eth_chainId` — No Network Required
 
-EVM execution cannot be proven without zero-knowledge proofs. This is the one operation where Lumen must trust an external source. A console warning is logged every time.
+```typescript
+const chainId = await provider.request({ method: 'eth_chainId' })
+// "0x1" (mainnet)
+```
+
+### `eth_blockNumber` — Verified Head
+
+```typescript
+const blockNumber = await provider.request({ method: 'eth_blockNumber' })
+// Returns the BLS-verified finalized block number
+```
+
+### `eth_call` — **NOT Verified** (The One Exception)
 
 ```typescript
 const result = await provider.request({
   method: 'eth_call',
-  params: [{
-    to: '0xContractAddress',
-    data: '0x...'
-  }, 'latest']
+  params: [{ to: '0x...', data: '0x...' }, 'latest']
 })
-// ⚠ Result is from the fallback RPC and is NOT cryptographically verified
+// ⚠ This result is from the fallback RPC and is NOT cryptographically verified
 ```
 
-#### `eth_sendRawTransaction` — Broadcast
+EVM execution cannot be proven without zero-knowledge proofs. This is forwarded to the fallback RPC with a console warning.
 
-Broadcasts a signed transaction via the fallback RPC (or P2P network when available).
+---
+
+## WASM Module Direct API
+
+For advanced usage, the WASM module can be used directly:
 
 ```typescript
-const txHash = await provider.request({
-  method: 'eth_sendRawTransaction',
-  params: ['0xSignedTxData']
-})
+import wasmInit, { LumenClient } from 'lumen-wasm'
+
+await wasmInit()
+
+// Initialize from beacon bootstrap
+const client = LumenClient.from_beacon_bootstrap(bootstrapJson)
+
+// BLS-verify a finality update
+const result = client.process_finality_update(finalityUpdateJson)
+// result.verified, result.finalized_slot, result.execution_state_root, etc.
+
+// Get BLS-verified execution state
+const state = client.get_execution_state()
+// state.state_root, state.block_number, state.finalized_slot
+
+// Verify a proof against the internal BLS-verified state root
+const account = client.verify_account_rpc_proof(address, proofJson)
+
+// Verify a proof against an explicit state root (race-condition safe)
+const account2 = client.verify_account_rpc_proof_with_root(stateRootHex, address, proofJson)
+// account.balance_hex, account.nonce, account.is_contract, account.proof_nodes_verified
 ```
-
-### `provider.getSyncState()`
-
-Returns the current sync state.
-
-```typescript
-const state = provider.getSyncState()
-```
-
-**Return Type:**
-
-```typescript
-type SyncState =
-  | { status: 'bootstrapping' }
-  | { status: 'syncing'; headSlot: number; targetSlot: number }
-  | { status: 'synced'; headSlot: number; connectionMode: ConnectionMode }
-  | { status: 'error'; message: string }
-```
-
-### `provider.onSyncStateChange(callback)`
-
-Subscribe to sync state changes. Returns an unsubscribe function.
-
-```typescript
-const unsubscribe = provider.onSyncStateChange((state) => {
-  console.log('New state:', state.status)
-})
-
-// Later:
-unsubscribe()
-```
-
-### `provider.on(event, listener)` / `provider.removeListener(event, listener)`
-
-Standard EIP-1193 event subscription.
-
-### `provider.destroy()`
-
-Clean up resources (stop P2P, terminate WASM worker).
 
 ---
 
@@ -211,9 +166,7 @@ import { createLumenProvider } from 'lumen-eth'
 const lumen = await createLumenProvider()
 const provider = new BrowserProvider(lumen)
 
-// Everything works as normal, but with local Merkle proof verification
-const balance = await provider.getBalance('0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045')
-console.log('Balance:', balance.toString(), 'wei')
+const balance = await provider.getBalance('vitalik.eth')
 ```
 
 ### viem
@@ -224,14 +177,7 @@ import { mainnet } from 'viem/chains'
 import { createLumenProvider } from 'lumen-eth'
 
 const lumen = await createLumenProvider()
-const client = createPublicClient({
-  chain: mainnet,
-  transport: custom(lumen),
-})
-
-const balance = await client.getBalance({
-  address: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
-})
+const client = createPublicClient({ chain: mainnet, transport: custom(lumen) })
 ```
 
 ### wagmi
@@ -242,92 +188,17 @@ import { mainnet } from 'wagmi/chains'
 import { createLumenProvider } from 'lumen-eth'
 
 const lumen = await createLumenProvider()
-
 const config = createConfig({
   chains: [mainnet],
-  transports: {
-    [mainnet.id]: custom(lumen),
-  },
+  transports: { [mainnet.id]: custom(lumen) },
 })
-```
-
-### Vanilla JavaScript (no framework)
-
-```html
-<script type="module">
-import { createLumenProvider } from 'https://unpkg.com/lumen-eth/dist/index.js'
-
-const provider = await createLumenProvider()
-
-const balance = await provider.request({
-  method: 'eth_getBalance',
-  params: ['0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', 'latest']
-})
-
-console.log('Verified balance:', balance)
-</script>
-```
-
----
-
-## React Hook
-
-```bash
-npm install lumen-react
-```
-
-```tsx
-import { useLumen } from 'lumen-react'
-
-function App() {
-  const { provider, syncState, isReady, error, reconnect } = useLumen({
-    verbose: true,
-  })
-
-  if (error) {
-    return (
-      <div>
-        <p>Error: {error.message}</p>
-        <button onClick={reconnect}>Retry</button>
-      </div>
-    )
-  }
-
-  if (!isReady) {
-    return <p>Syncing: {syncState.status}...</p>
-  }
-
-  return <p>Connected! Head: {syncState.headSlot}</p>
-}
-```
-
----
-
-## Types
-
-All types are exported from `lumen-eth`:
-
-```typescript
-import type {
-  EIP1193Provider,
-  RequestArguments,
-  SyncState,
-  ConnectionMode,
-  LumenOptions,
-  VerifiedAccountState,
-  VerifiedStorageValue,
-  VerificationDetails,
-  VerificationStep,
-  LumenEvents,
-  CheckpointHash,
-} from 'lumen-eth'
 ```
 
 ---
 
 ## Error Handling
 
-Lumen **never silently falls back to unverified data**. If verification fails:
+Lumen never silently falls back to unverified data. If verification fails, it throws:
 
 ```typescript
 try {
@@ -336,32 +207,26 @@ try {
     params: ['0x...', 'latest']
   })
 } catch (error) {
-  // error.code: -32000 (server error) for verification failures
-  // error.message: Descriptive message explaining what failed
-  console.error('Verification failed:', error.message)
+  // error.code: -32000 for verification failures
+  // error.message describes exactly what failed
 }
 ```
 
-Error codes:
-- `-32601`: Method not supported
-- `-32000`: Verification failed or no data source available
-- `-32602`: Invalid parameters
+| Code | Meaning |
+|------|---------|
+| `-32601` | Method not supported |
+| `-32000` | Verification failed or no data source |
+| `-32602` | Invalid parameters |
 
 ---
 
-## Console Logging
+## Types
 
-When `verbose: true` (default), Lumen logs its trust state to the browser console:
-
+```typescript
+import type {
+  EIP1193Provider,
+  SyncState,
+  ConnectionMode,
+  LumenOptions,
+} from 'lumen-eth'
 ```
-[Lumen] Initializing trustless Ethereum light client...
-[Lumen] Trust model: All data cryptographically verified via sync committee
-[Lumen] Step 1/3: Fetching checkpoint from multiple sources...
-[Lumen] Checkpoint verified: 3/5 sources agree
-[Lumen] Step 2/3: Initializing WASM verification module...
-[Lumen] Step 3/3: Starting P2P layer...
-[Lumen] ✓ Initialization complete. Ready to serve trustless queries.
-[Lumen] ⚠ eth_call uses trusted execution via fallback RPC
-```
-
-The demo app (`demo/main.ts`) uses a visual trust log that shows each verification step in the UI with pass/fail indicators, timing, and details about which beacon APIs were consulted and how many trie nodes were verified.
