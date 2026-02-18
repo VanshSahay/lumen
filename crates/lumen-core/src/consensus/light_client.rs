@@ -4,14 +4,23 @@ use crate::consensus::sync_committee::{
 };
 use crate::types::beacon::*;
 
-/// Generalized index for the finalized checkpoint in the beacon state.
-/// This is the index in the SSZ Merkle tree where the finalized checkpoint lives.
-const FINALIZED_ROOT_GINDEX: u64 = 105;
-const FINALIZED_ROOT_DEPTH: usize = 6;
+/// Generalized index for the finalized checkpoint root in the beacon state.
+/// This changed with the Electra fork (BeaconState grew past 32 fields → 64-leaf tree).
+///
+/// Pre-Electra (Deneb):  gindex=105, depth=6 (32-leaf top-level)
+/// Electra (current):     gindex=169, depth=7 (64-leaf top-level)
+///
+/// finalized_checkpoint is at field index 20:
+///   gindex(finalized_checkpoint) = 64 + 20 = 84
+///   gindex(finalized_checkpoint.root) = 84 * 2 + 1 = 169
+///   depth = floorlog2(169) = 7
+const FINALIZED_ROOT_GINDEX: u64 = 169;
+const FINALIZED_ROOT_DEPTH: usize = 7;
 
 /// Generalized index for the next sync committee in the beacon state.
-const NEXT_SYNC_COMMITTEE_GINDEX: u64 = 55;
-const NEXT_SYNC_COMMITTEE_DEPTH: usize = 5;
+/// Electra: next_sync_committee at field index 23, gindex = 64 + 23 = 87, depth = 6
+const NEXT_SYNC_COMMITTEE_GINDEX: u64 = 87;
+const NEXT_SYNC_COMMITTEE_DEPTH: usize = 6;
 
 /// Process a light client update, verifying all proofs and advancing state.
 ///
@@ -155,9 +164,9 @@ pub fn initialize_from_bootstrap(
     // Verify the sync committee is committed to in the beacon state
     if !bootstrap.current_sync_committee_branch.is_empty() {
         let committee_root = hash_sync_committee(&bootstrap.current_sync_committee);
-        // The current sync committee is at a different gindex than the next one
-        let current_sync_committee_gindex: u64 = 54;
-        let current_sync_committee_depth: usize = 5;
+        // Electra: current_sync_committee at field index 22, gindex = 64 + 22 = 86, depth = 6
+        let current_sync_committee_gindex: u64 = 86;
+        let current_sync_committee_depth: usize = 6;
 
         let is_valid = verify_merkle_branch(
             &committee_root,

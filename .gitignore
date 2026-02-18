@@ -26,3 +26,5 @@ Thumbs.db
 
 # Build artifacts
 *.wasm.gz
+
+.pnpm-store

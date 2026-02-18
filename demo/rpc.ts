@@ -94,22 +94,25 @@ export interface EthGetProofResponse {
 // --- Public API ---
 
 /**
- * Fetch the latest block header from an execution RPC.
+ * Fetch a block header by tag from an execution RPC.
  *
- * The state root from this block is used for Merkle proof verification.
- * We use "latest" because free public RPCs only serve eth_getProof for
- * very recent blocks (the proof window is typically <128 blocks).
- *
- * The block's relationship to the beacon chain finalized head is
- * cross-checked to ensure it extends the canonical chain.
+ * Supports standard tags: 'latest', 'finalized', 'safe', 'earliest', 'pending'.
+ * Free pruned RPCs can serve headers for any tag but only serve
+ * eth_getProof at 'latest'.
  */
-export async function getLatestBlock(): Promise<BlockHeader> {
+export async function getBlockByTag(
+  tag: string = 'latest',
+): Promise<BlockHeader> {
   const block = (await rpcCall('eth_getBlockByNumber', [
-    'latest',
+    tag,
     false,
   ])) as BlockHeader | null;
-  if (!block) throw new Error('Failed to fetch latest block');
+  if (!block) throw new Error(`Failed to fetch block at '${tag}'`);
   return block;
+}
+
+export async function getLatestBlock(): Promise<BlockHeader> {
+  return getBlockByTag('latest');
 }
 
 /**

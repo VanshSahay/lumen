@@ -1,49 +1,24 @@
 /**
- * Beacon Chain Light Client Sync
+ * Beacon Chain Data Transport
  *
- * Fetches light client finality updates from multiple independent beacon
- * chain API endpoints. The finality update contains:
- * - The finalized execution state root (what we ultimately verify proofs against)
- * - Sync committee participation (how many of the 512 validators attested)
- * - The finalized slot and execution block number
+ * Fetches data from Ethereum beacon chain REST APIs.
+ * These APIs are used as UNTRUSTED DATA TRANSPORT only.
  *
- * By fetching from MULTIPLE independent sources and comparing, we get
- * checkpoint-style consensus without trusting any single provider.
+ * All trust comes from:
+ * - BLS12-381 signature verification (in Rust/WASM via lumen-core)
+ * - Merkle branch verification (in Rust/WASM)
  *
- * In production, BLS12-381 signature verification (in WASM) would
- * cryptographically verify the sync committee signatures. The demo
- * uses multi-source consensus as an approximation.
+ * Even if every beacon API is compromised, they cannot forge a valid
+ * BLS aggregate signature from the sync committee.
+ *
+ * Data flow:
+ * 1. Fetch finalized block root → GET /eth/v1/beacon/headers/finalized
+ * 2. Fetch bootstrap (sync committee) → GET /eth/v1/beacon/light_client/bootstrap/{root}
+ * 3. Fetch finality update → GET /eth/v1/beacon/light_client/finality_update
+ * 4. Pass raw JSON to WASM for cryptographic verification
  */
 
-export interface BeaconFinalityUpdate {
-  /** Beacon chain slot that was finalized */
-  slot: number;
-  /** Execution layer state root from the finalized block */
-  executionStateRoot: string;
-  /** Execution layer block number */
-  executionBlockNumber: number;
-  /** Execution layer block hash */
-  executionBlockHash: string;
-  /** Number of sync committee members that signed (out of 512) */
-  syncParticipation: number;
-  /** Total sync committee size (always 512 on mainnet) */
-  syncCommitteeSize: number;
-  /** Which beacon API source provided this data */
-  source: string;
-}
-
-export interface BeaconConsensusResult {
-  /** The finality update that all sources agreed on */
-  finality: BeaconFinalityUpdate;
-  /** Number of independent sources that agreed */
-  sourcesAgreed: number;
-  /** Total number of sources queried */
-  sourcesQueried: number;
-  /** Names of sources that agreed */
-  agreeSources: string[];
-}
-
-/** Independent beacon chain API endpoints (not execution RPCs). */
+/** Independent beacon chain API endpoints (data transport, NOT trusted). */
 const BEACON_APIS = [
   {
     name: 'ChainSafe Lodestar',
@@ -55,164 +30,154 @@ const BEACON_APIS = [
   },
 ];
 
-interface RawFinalityResponse {
-  version?: string;
-  data: {
-    finalized_header: {
-      beacon: {
-        slot: string;
-        proposer_index: string;
-        parent_root: string;
-        state_root: string;
-        body_root: string;
+// ---------------------------------------------------------------------------
+// Bootstrap: fetch the sync committee for BLS verification
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch the finalized block root from a beacon API.
+ * This root is used to fetch the bootstrap (sync committee).
+ */
+export async function fetchFinalizedBlockRoot(): Promise<{
+  root: string;
+  slot: number;
+  source: string;
+}> {
+  for (const api of BEACON_APIS) {
+    try {
+      const resp = await fetch(
+        `${api.url}/eth/v1/beacon/headers/finalized`,
+        {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(10_000),
+        },
+      );
+      if (!resp.ok) continue;
+      const json = await resp.json();
+      return {
+        root: json.data.root,
+        slot: parseInt(json.data.header.message.slot, 10),
+        source: api.name,
       };
-      execution: {
-        state_root: string;
-        block_number: string;
-        block_hash: string;
-        [key: string]: unknown;
-      };
-    };
-    sync_aggregate: {
-      sync_committee_bits: string;
-      sync_committee_signature: string;
-    };
-    signature_slot: string;
-  };
+    } catch {
+      continue;
+    }
+  }
+  throw new Error('All beacon APIs failed to return finalized block root');
 }
 
 /**
- * Count the number of set bits in a hex string (sync committee participation).
- * Each bit represents one validator's signature.
+ * Fetch the light client bootstrap data for a given block root.
+ * Returns the RAW JSON string — it goes straight to WASM for verification.
+ *
+ * The bootstrap contains:
+ * - The beacon block header at the checkpoint
+ * - The current sync committee (512 BLS public keys)
+ * - The execution payload header (with state root)
  */
-function countParticipation(hexBits: string): {
-  participating: number;
-  total: number;
-} {
+export async function fetchBootstrapJson(
+  blockRoot: string,
+): Promise<{ json: string; source: string }> {
+  for (const api of BEACON_APIS) {
+    try {
+      const resp = await fetch(
+        `${api.url}/eth/v1/beacon/light_client/bootstrap/${blockRoot}`,
+        {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(15_000),
+        },
+      );
+      if (!resp.ok) continue;
+      const json = await resp.text();
+      return { json, source: api.name };
+    } catch {
+      continue;
+    }
+  }
+  throw new Error('All beacon APIs failed to return bootstrap data');
+}
+
+// ---------------------------------------------------------------------------
+// Finality updates: the data that gets BLS-verified
+// ---------------------------------------------------------------------------
+
+export interface RawFinalityUpdate {
+  /** Raw JSON string — passed directly to WASM for BLS verification */
+  json: string;
+  /** Finalized beacon slot (parsed for display, NOT trusted until BLS-verified) */
+  claimedSlot: number;
+  /** Execution block number (parsed for display, NOT trusted until BLS-verified) */
+  claimedBlockNumber: number;
+  /** Execution state root (parsed for display, NOT trusted until BLS-verified) */
+  claimedStateRoot: string;
+  /** Sync committee participation count (parsed for display) */
+  claimedParticipation: number;
+  /** Which beacon API returned this data */
+  source: string;
+}
+
+/**
+ * Fetch a finality update from beacon APIs.
+ * Returns the raw JSON for WASM BLS verification, plus parsed display data.
+ *
+ * The "claimed" fields are parsed for UI display but are NOT trusted
+ * until the WASM module verifies the BLS signature.
+ */
+export async function fetchFinalityUpdateRaw(): Promise<RawFinalityUpdate> {
+  for (const api of BEACON_APIS) {
+    try {
+      const resp = await fetch(
+        `${api.url}/eth/v1/beacon/light_client/finality_update`,
+        {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(10_000),
+        },
+      );
+      if (!resp.ok) continue;
+
+      const text = await resp.text();
+      const parsed = JSON.parse(text);
+      const fin = parsed.data.finalized_header;
+
+      return {
+        json: text,
+        claimedSlot: parseInt(fin.beacon.slot, 10),
+        claimedBlockNumber: parseInt(fin.execution?.block_number || '0', 10),
+        claimedStateRoot: fin.execution?.state_root || '0x',
+        claimedParticipation: countParticipation(
+          parsed.data.sync_aggregate.sync_committee_bits,
+        ),
+        source: api.name,
+      };
+    } catch {
+      continue;
+    }
+  }
+  throw new Error('All beacon APIs failed to return finality update');
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Count set bits in a hex-encoded bitvector (sync committee participation).
+ */
+function countParticipation(hexBits: string): number {
   const bits = hexBits.startsWith('0x') ? hexBits.slice(2) : hexBits;
   let count = 0;
   for (const char of bits) {
     const nibble = parseInt(char, 16);
-    count += ((nibble >> 0) & 1) + ((nibble >> 1) & 1) +
-             ((nibble >> 2) & 1) + ((nibble >> 3) & 1);
+    count +=
+      ((nibble >> 0) & 1) +
+      ((nibble >> 1) & 1) +
+      ((nibble >> 2) & 1) +
+      ((nibble >> 3) & 1);
   }
-  return { participating: count, total: 512 };
+  return count;
 }
 
-/**
- * Fetch a light client finality update from a single beacon API.
- */
-async function fetchFromBeaconAPI(
-  api: { name: string; url: string },
-  signal?: AbortSignal,
-): Promise<BeaconFinalityUpdate> {
-  const endpoint = `${api.url}/eth/v1/beacon/light_client/finality_update`;
-
-  const response = await fetch(endpoint, {
-    headers: { Accept: 'application/json' },
-    signal,
-  });
-
-  if (!response.ok) {
-    throw new Error(`${api.name}: HTTP ${response.status}`);
-  }
-
-  const raw: RawFinalityResponse = await response.json();
-  const finalized = raw.data.finalized_header;
-  const sync = raw.data.sync_aggregate;
-  const { participating, total } = countParticipation(sync.sync_committee_bits);
-
-  return {
-    slot: parseInt(finalized.beacon.slot, 10),
-    executionStateRoot: finalized.execution.state_root,
-    executionBlockNumber: parseInt(finalized.execution.block_number, 10),
-    executionBlockHash: finalized.execution.block_hash,
-    syncParticipation: participating,
-    syncCommitteeSize: total,
-    source: api.name,
-  };
-}
-
-/**
- * Fetch finality updates from ALL beacon APIs and verify consensus.
- *
- * All sources must agree on the same finalized execution state root.
- * If any source disagrees, we report the discrepancy.
- *
- * This is the "checkpoint sync" trust model: we trust that multiple
- * independent operators are not colluding. In production, BLS signature
- * verification would make this fully trustless.
- */
-export async function fetchBeaconConsensus(): Promise<BeaconConsensusResult> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
-
-  try {
-    const results = await Promise.allSettled(
-      BEACON_APIS.map((api) => fetchFromBeaconAPI(api, controller.signal)),
-    );
-
-    const successes: BeaconFinalityUpdate[] = [];
-    const failures: string[] = [];
-
-    for (let i = 0; i < results.length; i++) {
-      const result = results[i];
-      if (result.status === 'fulfilled') {
-        successes.push(result.value);
-      } else {
-        failures.push(
-          `${BEACON_APIS[i].name}: ${result.reason?.message || 'unknown error'}`,
-        );
-      }
-    }
-
-    if (successes.length === 0) {
-      throw new Error(
-        `All beacon APIs failed: ${failures.join('; ')}`,
-      );
-    }
-
-    // Check consensus: all successful sources must agree on the state root
-    const referenceRoot = successes[0].executionStateRoot;
-    const agreeSources: string[] = [];
-    const disagreeSources: string[] = [];
-
-    for (const update of successes) {
-      if (update.executionStateRoot === referenceRoot) {
-        agreeSources.push(update.source);
-      } else {
-        disagreeSources.push(update.source);
-      }
-    }
-
-    if (disagreeSources.length > 0) {
-      throw new Error(
-        `Beacon chain consensus FAILED: sources disagree on finalized state root. ` +
-          `Agree (${agreeSources.join(', ')}): ${referenceRoot}, ` +
-          `Disagree (${disagreeSources.join(', ')}): different roots. ` +
-          `This could indicate a chain split or compromised API.`,
-      );
-    }
-
-    // Take the update with highest participation as the reference
-    const best = successes.reduce((a, b) =>
-      a.syncParticipation > b.syncParticipation ? a : b,
-    );
-
-    return {
-      finality: best,
-      sourcesAgreed: agreeSources.length,
-      sourcesQueried: BEACON_APIS.length,
-      agreeSources,
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-/**
- * Get all configured beacon API names.
- */
+/** Get all configured beacon API names. */
 export function getBeaconSources(): string[] {
   return BEACON_APIS.map((api) => api.name);
 }

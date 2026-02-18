@@ -410,7 +410,7 @@
           <div class="stat-value" id="sync-period">—</div>
         </div>
         <div class="stat-item">
-          <div class="stat-label">Beacon Sources</div>
+          <div class="stat-label">BLS Signers</div>
           <div class="stat-value" id="peer-count">0</div>
         </div>
         <div class="stat-item">
@@ -437,9 +437,9 @@
         <h2>Verify Account Balance</h2>
       </div>
       <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1rem;">
-        Enter any Ethereum address. State root from beacon chain consensus
-        (multi-source). Merkle proof fetched from an untrusted execution node
-        and verified locally via keccak256.
+        Enter any Ethereum address. State root BLS-verified by the sync committee
+        in Rust/WASM. Merkle proof fetched from an untrusted execution node
+        and verified via keccak256 in Rust/WASM. Zero TypeScript crypto.
       </p>
       <div class="input-group">
         <input
@@ -475,23 +475,28 @@
         <tbody>
           <tr>
             <td>State root</td>
-            <td class="trust-verified">Beacon Consensus</td>
-            <td>Multi-source beacon chain finality update</td>
+            <td class="trust-verified">BLS-Verified</td>
+            <td>Sync committee BLS12-381 aggregate signature (Rust/WASM)</td>
           </tr>
           <tr>
             <td>eth_getBalance</td>
             <td class="trust-verified">Locally Verified</td>
-            <td>keccak256 Merkle-Patricia trie proof</td>
+            <td>keccak256 Merkle-Patricia trie proof (Rust/WASM)</td>
           </tr>
           <tr>
             <td>eth_getStorageAt</td>
             <td class="trust-verified">Locally Verified</td>
-            <td>Storage proof against verified account root</td>
+            <td>Storage proof against verified account root (Rust/WASM)</td>
           </tr>
           <tr>
-            <td>Proof data</td>
-            <td class="trust-verified">Untrusted Transport</td>
-            <td>From any RPC — verified locally, source irrelevant</td>
+            <td>Beacon APIs</td>
+            <td class="trust-verified">Data Transport</td>
+            <td>Fetches bootstrap + updates — BLS verification rejects fakes</td>
+          </tr>
+          <tr>
+            <td>Execution RPCs</td>
+            <td class="trust-verified">Data Transport</td>
+            <td>Fetches proofs — keccak256 verification rejects fakes</td>
           </tr>
           <tr>
             <td>eth_call</td>
@@ -523,7 +528,7 @@
         <a href="docs/api.html">API Reference</a>
       </p>
       <p style="margin-top: 0.5rem;">
-        Balances verified via Merkle-Patricia trie proofs. No API key. No account. No extension.
+        BLS12-381 + keccak256 verification in Rust/WASM. No API key. No account. No extension.
       </p>
     </footer>
   </div>
